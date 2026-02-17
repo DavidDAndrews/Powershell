@@ -11,7 +11,7 @@
 [CmdletBinding(
     SupportsShouldProcess = $true,    # Enables -WhatIf and -Confirm parameters
     DefaultParameterSetName = "Default",
-    HelpUri = "https://github.com/DavidDAndrews/PS-FixW11",
+    HelpUri = "https://github.com/DavidDAndrews/FixWindows",
     ConfirmImpact = "High"            # High impact operations require confirmation
 )]
 param(
@@ -51,46 +51,17 @@ param(
 # NETWORK PATHS AND ISO CONFIGURATIONS
 # ============================================================================
 
-# Base network path for ISO files
-$ISO_SOURCE_PATH = "\\192.168.111.10\nas-data\ISO\WINDOWS"
 
 # ISO file names for different Windows versions
 $ISO_FILES = @{
-    'WIN11'   = "W11PRO-24H2.ISO"    # Windows 11 Pro ISO
-    'WIN10'   = "W10PRO-1809.ISO"    # Windows 10 Pro ISO
-    'SVR2022' = "W2022.ISO"          # Windows Server 2022 ISO
-    'SVR2019' = "W2019-1809.ISO"     # Windows Server 2019 ISO
-    'SVR2016' = "W2016-1607.ISO"     # Windows Server 2016 ISO
-}
-
-# WIM index values for different installations
-$WIM_VALUES = @{
-    'DESKTOP'     = "1"    # Standard desktop installations
-    'SERVER_CORE' = "1"    # Server Core installations
-    'SERVER_FULL' = "2"    # Full Server installations with GUI
-}
-
-# ============================================================================
-# MAINTENANCE CONFIGURATIONS
-# ============================================================================
-
-# Cleanup thresholds
-$DEFAULT_DAYS_TO_DELETE = 1     # Days before temp files are deleted
-$PROFILE_AGE_LIMIT = 30         # Days before unused profiles are considered stale
-$IIS_LOG_AGE_LIMIT = 60        # Days before IIS logs are deleted
-
-# Maintenance paths to clean
-$CLEANUP_PATHS = @{
-    'WINDOWS_TEMP'    = "$env:windir\Temp"
-    'SYSTEM_TEMP'     = "C:\Windows\Temp"
-    'USER_TEMP'       = "C:\Users\*\AppData\Local\Temp"
-    'IIS_LOGS'        = "C:\inetpub\logs\LogFiles"
-    'CBS_LOGS'        = "C:\Windows\logs\CBS"
-    'MINIDUMPS'       = "$env:windir\minidump"
-    'PREFETCH'        = "$env:windir\Prefetch"
-    'ERROR_REPORTS'   = "C:\ProgramData\Microsoft\Windows\WER"
-    'CONFIG_MSI'      = "C:\Config.Msi"
-    'INTEL'           = "C:\Intel"
+    'WIN11'      = "W11PRO-24H2.ISO"    # Windows 11 Pro ISO
+    'WIN11_ARM64' = "W11Pro-ARM64.iso" # Windows 11 Pro ARM64 ISO
+    'WIN10'      = "W10PRO-1809.ISO"    # Windows 10 Pro ISO
+    'SVR2025'    = "W2025.ISO"          # Windows Server 2025 ISO
+    'SVR2022'    = "W2022.ISO"          # Windows Server 2022 ISO
+    'SVR2019'    = "W2019-1809.ISO"     # Windows Server 2019 ISO
+    'SVR2016'    = "W2016-1607.ISO"     # Windows Server 2016 ISO
+    'SVR2012R2'  = "W2012R2-1207.ISO"   # Windows Server 2012 R2 ISO
 }
 
 # ============================================================================
@@ -101,10 +72,6 @@ $CLEANUP_PATHS = @{
 $ErrorActionPreference = "Stop"              # Stop on errors by default
 $VerbosePreference = "Continue"             # Show verbose output
 
-# Logging configuration
-$LOG_PATH = "C:\SVC"                        # Path for log files
-$LOG_PREFIX = "Clean-"                      # Prefix for log files
-$LOG_EXTENSION = ".log"                     # Log file extension
 
 #endregion CONFIGURABLE VARIABLES
 
@@ -120,21 +87,9 @@ $LOG_EXTENSION = ".log"                     # Log file extension
        - Update the ISO filenames to match your environment
        - Ensure the ISO names exactly match your available files
     
-    3. WIM_VALUES:
-       - Modify if your WIM indexes differ from standard Microsoft images
-       - Use 'dism /get-wiminfo /wimfile:install.wim' to verify correct index
-    
-    4. CLEANUP_PATHS:
-       - Add or remove paths based on your cleanup requirements
-       - Use environment variables where possible for compatibility
-    
-    5. MAINTENANCE CONFIGURATIONS:
-       - Adjust retention periods based on your storage and compliance needs
+    3. MAINTENANCE CONFIGURATIONS:
+       - Adjust DaysToDelete and ProfileAge parameters as needed
        - All values are in days
-    
-    6. LOG_PATH:
-       - Set to a location with adequate space and permissions
-       - Ensure the path exists before running the script
 #>
 
 # Function definitions must come before they are used
@@ -186,11 +141,6 @@ Clear-Host
 
 $OSVersion = Get-CimInstance Win32_OperatingSystem
 $BuildNumber = $OSVersion.BuildNumber
-$ISOFile = if ($null -ne $DestinationISO -and $DestinationISO.Length -gt 0) {
-    Split-Path $DestinationISO -Leaf
-} else {
-    "No ISO specified"
-}
 # Helper functions for different message types
 function Write-WarningBox {
     param([string]$Message)
@@ -207,10 +157,11 @@ function Write-SuccessBox {
     Write-BoxedText -Title "√ SUCCESS" -Messages @($Message) -ForegroundColor Green
 }
 
+
 # Self-elevate the script to run with admin privileges
 if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     Write-Host "Attempting to run script as administrator..." -ForegroundColor Yellow
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
+    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $($args -join ' ')" -Verb RunAs
     Exit
 }
 
@@ -219,6 +170,17 @@ $OSInfo = Get-WmiObject Win32_OperatingSystem
 $OSVersion = [System.Environment]::OSVersion.Version
 $OSProductType = $OSInfo.ProductType # 1 = Workstation, 2 = Domain Controller, 3 = Server
 $OSCaption = $OSInfo.Caption
+$OSArchitecture = $OSInfo.OSArchitecture # Get system architecture (32-bit, 64-bit, ARM64)
+
+# Additional ARM64 detection methods
+$ProcessorArch = $env:PROCESSOR_ARCHITECTURE
+$ProcessorArchW6432 = $env:PROCESSOR_ARCHITEW6432
+$IsARM64 = $false
+
+# Check multiple methods for ARM64 detection
+if ($OSArchitecture -match "ARM64" -or $ProcessorArch -eq "ARM64" -or $ProcessorArchW6432 -eq "ARM64") {
+    $IsARM64 = $true
+}
 
 # Initialize variables
 $MyWinVer = $null
@@ -230,12 +192,19 @@ if ($OSProductType -eq 1) {
     # Workstation (Windows 10/11)
     if ($OSVersion.Major -eq 10) {
         if ($OSVersion.Build -ge 22000) {
-            $MyWinVer = "WIN-11"
-            $ISO = "W11PRO-24H2.ISO"
-            $detectedOS = "Windows 11"
+            # Windows 11 - check for ARM64 architecture
+            if ($IsARM64) {
+                $MyWinVer = "WIN-11-ARM64"
+                $ISO = $ISO_FILES['WIN11_ARM64']
+                $detectedOS = "Windows 11 ARM64"
+            } else {
+                $MyWinVer = "WIN-11"
+                $ISO = $ISO_FILES['WIN11']
+                $detectedOS = "Windows 11"
+            }
         } else {
             $MyWinVer = "WIN-10"
-            $ISO = "W10PRO-1809.ISO"
+            $ISO = $ISO_FILES['WIN10']
             $detectedOS = "Windows 10"
         }
     }
@@ -244,35 +213,57 @@ if ($OSProductType -eq 1) {
     if ($OSCaption -match "2016") {
         if ($OSCaption -match "Server Core") {
             $MyWinVer = "2016SC"
-            $ISO = "W2016-1607.ISO"
+            $ISO = $ISO_FILES['SVR2016']
         } else {
             $MyWinVer = "2016DE"
             $WimVal = "2"
-            $ISO = "W2016-1607.ISO"
+            $ISO = $ISO_FILES['SVR2016']
         }
         $detectedOS = "Windows Server 2016"
     }
     elseif ($OSCaption -match "2019") {
         if ($OSCaption -match "Server Core") {
             $MyWinVer = "2019SC"
-            $ISO = "W2019-1809.ISO"
+            $ISO = $ISO_FILES['SVR2019']
         } else {
             $MyWinVer = "2019DE"
             $WimVal = "2"
-            $ISO = "W2019-1809.ISO"
+            $ISO = $ISO_FILES['SVR2019']
         }
         $detectedOS = "Windows Server 2019"
     }
     elseif ($OSCaption -match "2022") {
         if ($OSCaption -match "Server Core") {
             $MyWinVer = "2022SC"
-            $ISO = "W2022.ISO"
+            $ISO = $ISO_FILES['SVR2022']
         } else {
             $MyWinVer = "2022DE"
             $WimVal = "2"
-            $ISO = "W2022.ISO"
+            $ISO = $ISO_FILES['SVR2022']
         }
         $detectedOS = "Windows Server 2022"
+    }
+    elseif ($OSCaption -match "2025") {
+        if ($OSCaption -match "Server Core") {
+            $MyWinVer = "2025SC"
+            $ISO = $ISO_FILES['SVR2025']
+        } else {
+            $MyWinVer = "2025DE"
+            $WimVal = "2"
+            $ISO = $ISO_FILES['SVR2025']
+        }
+        $detectedOS = "Windows Server 2025"
+    }
+    elseif ($OSCaption -match "2012 R2") {
+        if ($OSCaption -match "Server Core") {
+            $MyWinVer = "2012R2SC"
+            $ISO = $ISO_FILES['SVR2012R2']
+        } else {
+            $MyWinVer = "2012R2DE"
+            $WimVal = "2"
+            $ISO = $ISO_FILES['SVR2012R2']
+        }
+        $detectedOS = "Windows Server 2012 R2"
     }
 }
 
@@ -282,6 +273,7 @@ if ($MyWinVer) {
         "$detectedOS detected",
         "Build Number: $($OSVersion.Build)",
         "System Type: $MyWinVer",
+        "Architecture: $(if ($IsARM64) { 'ARM64' } else { 'x64' })",
         "Using ISO: $ISO",
         "WIM Value: $(if ($WimVal) { $WimVal } else { 'Not Required' })"
     ) -ForegroundColor Green
@@ -314,6 +306,67 @@ $NasIP = "192.168.111.10"
 $NasShare = "nas-data"
 $NasFolderPath = "ISO\WINDOWS"
 $SourceISO="\\"+$NasIP+"\"+$NasShare+"\"+$NasFolderPath+"\"+$ISO
+
+# Network share credential management
+$CredentialPath = "$env:USERPROFILE\FixWindows-Credentials.xml"
+$NetworkPath = "\\$NasIP\$NasShare"
+
+function Connect-NetworkShare {
+    param(
+        [string]$NetworkPath,
+        [PSCredential]$Credential
+    )
+    
+    # First try to access without credentials
+    try {
+        $null = Get-ChildItem $NetworkPath -ErrorAction Stop
+        Write-Host "Network share accessible without additional credentials" -ForegroundColor Green
+        return $true
+    }
+    catch {
+        Write-Host "Network share requires credentials" -ForegroundColor Yellow
+    }
+    
+    # Check if stored credentials exist
+    if (Test-Path $CredentialPath) {
+        Write-Host "Found stored credentials, attempting to use them..." -ForegroundColor Cyan
+        try {
+            $StoredCredential = Import-Clixml -Path $CredentialPath
+            $null = New-PSDrive -Name "TempNAS" -PSProvider FileSystem -Root $NetworkPath -Credential $StoredCredential -ErrorAction Stop
+            Remove-PSDrive -Name "TempNAS" -Force
+            Write-Host "Successfully connected using stored credentials" -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "Stored credentials failed, will prompt for new ones" -ForegroundColor Yellow
+            Remove-Item $CredentialPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+    
+    # Prompt for new credentials
+    Write-Host "Please provide credentials for network share: $NetworkPath" -ForegroundColor Yellow
+    $Credential = Get-Credential -Message "Enter credentials for $NetworkPath"
+    
+    if ($Credential) {
+        try {
+            $null = New-PSDrive -Name "TempNAS" -PSProvider FileSystem -Root $NetworkPath -Credential $Credential -ErrorAction Stop
+            Remove-PSDrive -Name "TempNAS" -Force
+            
+            # Store encrypted credentials
+            $Credential | Export-Clixml -Path $CredentialPath
+            Write-Host "Credentials verified and stored securely" -ForegroundColor Green
+            return $true
+        }
+        catch {
+            Write-Host "Failed to connect with provided credentials: $($_.Exception.Message)" -ForegroundColor Red
+            return $false
+        }
+    }
+    else {
+        Write-Host "No credentials provided" -ForegroundColor Red
+        return $false
+    }
+}
 ## Specify the Drive Letter that the ISO Will be copied down to
 $DestDrive="C:\"
 ## Specify the Name of the Local folder where the ISO will be placed
@@ -354,15 +407,62 @@ Clear-Host
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 ## Installs Nuget Package
-Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force:$true -Confirm:$false | Out-Null
+try {
+    # Check if NuGet provider is already installed
+    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+        Write-Host "Installing NuGet package provider..." -ForegroundColor Yellow
+        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false | Out-Null
+        Write-Host "NuGet package provider installed successfully." -ForegroundColor Green
+    } else {
+        Write-Host "NuGet package provider is already installed." -ForegroundColor Green
+    }
+} catch {
+    Write-Warning "Failed to install NuGet package provider: $($_.Exception.Message)"
+    Write-Host "Attempting alternative installation method..." -ForegroundColor Yellow
+    try {
+        # Alternative: Try to configure PowerShellGet if available
+        Write-Host "Attempting to configure PowerShell Gallery..." -ForegroundColor Yellow
+        
+        # Import PowerShellGet module if available
+        if (Get-Module -ListAvailable -Name PowerShellGet -ErrorAction SilentlyContinue) {
+            Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue
+            
+            # Try to configure PSGallery repository
+            if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
+                Register-PSRepository -Default -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            }
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Write-Host "PSGallery repository configured successfully." -ForegroundColor Green
+        } else {
+            Write-Host "PowerShellGet module not available, skipping repository configuration." -ForegroundColor Yellow
+        }
+    } catch {
+        Write-Warning "Failed to configure package management: $($_.Exception.Message)"
+        Write-Host "Continuing without PowerShell Gallery configuration." -ForegroundColor Yellow
+    }
+}
 
 ## Tests if the log file already exists and Deletes old file if there is a conflict
 if(Test-Path $Logfile)
     {
     #Delete previous file if one exists from same day
-    Remove-Item $Logfile -Force -Verbose
+    try {
+        # Stop any existing transcript before removing the file
+        try { Stop-Transcript -ErrorAction SilentlyContinue } catch { }
+        
+        # Wait a moment for file handles to release
+        Start-Sleep -Milliseconds 500
+        
+        # Try to remove the file
+        Remove-Item $Logfile -Force -Verbose
+        Write-Host "Previous log file removed successfully." -ForegroundColor Yellow
+    } catch {
+        Write-Warning "Could not remove existing log file: $($_.Exception.Message)"
+        Write-Host "Will append to existing log file instead." -ForegroundColor Yellow
+    }
+    
     ## Starts a transcript Log of Activities in User Desktop
-    Write-Host (Start-Transcript -Path $Logfile) -ForegroundColor Green
+    Write-Host (Start-Transcript -Path $Logfile -Append) -ForegroundColor Green
     } 
 else 
     {
@@ -519,7 +619,22 @@ If (Test-Path $DestinationISO)
     }
 else 
     {
-    ## No
+    ## No - Need to download ISO
+    Write-Host "Attempting to connect to network share..." -ForegroundColor Cyan
+    
+    # Check network share connectivity and credentials
+    if (-not (Connect-NetworkShare -NetworkPath $NetworkPath -CredentialPath $CredentialPath)) {
+        Write-Host "Failed to connect to network share. Cannot download ISO." -ForegroundColor Red
+        Write-Host "Please check network connectivity and credentials." -ForegroundColor Yellow
+        exit 1
+    }
+    
+    # Load stored credentials if they exist
+    $NetworkCredential = $null
+    if (Test-Path $CredentialPath) {
+        $NetworkCredential = Import-Clixml -Path $CredentialPath
+    }
+    
     if (-Not (Test-Path $DestPath)) 
         ## Create Local Folder
         {
@@ -532,7 +647,16 @@ else
             "COPYING DOWN WINDOWS ISO IMAGE TO LOCAL DRIVE SINCE",
             "IT WAS NOT FOUND IN SERVICE FOLDER LOCALLY"
         ) -ForegroundColor DarkYellow
-        Copy-Item -Path $SourceISO -Destination $DestPath -Force
+        
+        # Use credentials if available
+        if ($NetworkCredential) {
+            $null = New-PSDrive -Name "NASISO" -PSProvider FileSystem -Root $NetworkPath -Credential $NetworkCredential
+            Copy-Item -Path $SourceISO -Destination $DestPath -Force
+            Remove-PSDrive -Name "NASISO" -Force
+        }
+        else {
+            Copy-Item -Path $SourceISO -Destination $DestPath -Force
+        }
         }
     else  
         {
@@ -543,7 +667,16 @@ else
             "COPYING DOWN WINDOWS ISO IMAGE TO LOCAL DRIVE SINCE",
             "IT WAS NOT FOUND IN SERVICE FOLDER LOCALLY"
         ) -ForegroundColor DarkYellow
-        Copy-Item -Path $SourceISO -Destination $DestPath -Force
+        
+        # Use credentials if available
+        if ($NetworkCredential) {
+            $null = New-PSDrive -Name "NASISO" -PSProvider FileSystem -Root $NetworkPath -Credential $NetworkCredential
+            Copy-Item -Path $SourceISO -Destination $DestPath -Force
+            Remove-PSDrive -Name "NASISO" -Force
+        }
+        else {
+            Copy-Item -Path $SourceISO -Destination $DestPath -Force
+        }
         }
     }
 
@@ -859,9 +992,19 @@ Write-Host ""
 
 Write-BoxedText -Title "STARTING USER PROFILE CLEANUP" -ForegroundColor DarkGreen
 Write-Host "Checking for user profiles that are older than $ProfileAge days..." -ForegroundColor DarkGreen 
-Get-WmiObject -Class Win32_UserProfile | Where-Object {(!$_.Special) -and ($_.ConvertToDateTime($_.LastUseTime) -lt (Get-Date).AddDays(-$ProfileAge)) -and ($_.SID -notmatch '-500$')} |
-ForEach-Object {
-$_ | Remove-WmiObject
+Get-WmiObject -Class Win32_UserProfile | Where-Object {
+    (!$_.Special) -and 
+    ($_.SID -notmatch '-500$') -and
+    ($_.LastUseTime -ne $null) -and
+    ([Management.ManagementDateTimeConverter]::ToDateTime($_.LastUseTime) -lt (Get-Date).AddDays(-$ProfileAge))
+} | ForEach-Object {
+    Write-Host "Removing user profile: $($_.LocalPath)" -ForegroundColor Yellow
+    try {
+        $_ | Remove-WmiObject
+        Write-Host "Successfully removed profile: $($_.LocalPath)" -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to remove profile $($_.LocalPath): $($_.Exception.Message)"
+    }
 }
 Write-Host ""
 
@@ -905,10 +1048,80 @@ $AfterUsage = Get-WmiObject Win32_LogicalDisk | Where-Object { $_.DriveType -eq 
 
 ## Check for and Perform Windows Updates if needed (Patching) 
 Write-BoxedText -Title "RUN WINDOWS UPDATE" -ForegroundColor DarkGreen
-Set-PSRepository PSGallery -InstallationPolicy Trusted
-Install-Module PSWindowsUpdate -Confirm:$False -Force:$true | Out-Null
-Get-WindowsUpdate
-Install-WindowsUpdate -Confirm:$false
+
+# Test PowerShellGet functionality
+$PowerShellGetWorking = $false
+try {
+    # Test if PowerShellGet can be imported without errors
+    $null = Import-Module PowerShellGet -Force -ErrorAction Stop
+    $null = Get-PSRepository -Name PSGallery -ErrorAction Stop
+    $PowerShellGetWorking = $true
+    Write-Host "PowerShellGet is working correctly." -ForegroundColor Green
+} catch {
+    Write-Warning "PowerShellGet is corrupted or unavailable: $($_.Exception.Message)"
+    Write-Host "Using alternative Windows Update method..." -ForegroundColor Yellow
+}
+
+if ($PowerShellGetWorking) {
+    # Try using PSWindowsUpdate module
+    try {
+        Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+        Install-Module PSWindowsUpdate -Confirm:$False -Force:$true -ErrorAction Stop | Out-Null
+        Write-Host "PSWindowsUpdate module installed successfully." -ForegroundColor Green
+        
+        Get-WindowsUpdate
+        Install-WindowsUpdate -Confirm:$false
+    } catch {
+        Write-Warning "Failed to use PSWindowsUpdate module: $($_.Exception.Message)"
+        $PowerShellGetWorking = $false
+    }
+}
+
+if (-not $PowerShellGetWorking) {
+    # Use built-in Windows Update COM objects
+    try {
+        Write-Host "Using built-in Windows Update COM objects..." -ForegroundColor Yellow
+        $UpdateSession = New-Object -ComObject Microsoft.Update.Session
+        $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
+        
+        Write-Host "Searching for available updates..." -ForegroundColor Yellow
+        $SearchResult = $UpdateSearcher.Search("IsInstalled=0")
+        
+        if ($SearchResult.Updates.Count -gt 0) {
+            Write-Host "Found $($SearchResult.Updates.Count) available updates:" -ForegroundColor Yellow
+            
+            # Display update details
+            foreach ($Update in $SearchResult.Updates) {
+                Write-Host "  - $($Update.Title)" -ForegroundColor Cyan
+            }
+            
+            # Install updates
+            Write-Host "Installing updates..." -ForegroundColor Yellow
+            $UpdatesToInstall = New-Object -ComObject Microsoft.Update.UpdateColl
+            foreach ($Update in $SearchResult.Updates) {
+                $UpdatesToInstall.Add($Update)
+            }
+            
+            $Installer = $UpdateSession.CreateUpdateInstaller()
+            $Installer.Updates = $UpdatesToInstall
+            $InstallResult = $Installer.Install()
+            
+            if ($InstallResult.ResultCode -eq 2) {
+                Write-Host "Updates installed successfully!" -ForegroundColor Green
+                if ($InstallResult.RebootRequired) {
+                    Write-Host "A reboot is required to complete the installation." -ForegroundColor Yellow
+                }
+            } else {
+                Write-Warning "Update installation completed with result code: $($InstallResult.ResultCode)"
+            }
+        } else {
+            Write-Host "No updates available." -ForegroundColor Green
+        }
+    } catch {
+        Write-Warning "Could not check for Windows Updates: $($_.Exception.Message)"
+        Write-Host "Please check for updates manually in Windows Settings." -ForegroundColor Yellow
+    }
+}
 Write-Host "" 
 Write-BoxedText -Title "WINDOWS UPDATES COMPLETED" -ForegroundColor DarkGreen
 Write-Host "*******************************" -ForegroundColor DarkGreen

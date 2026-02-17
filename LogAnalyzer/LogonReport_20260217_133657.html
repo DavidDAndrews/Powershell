@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Windows Logon Session Report</title>
+<style>
+    :root {
+        --bg: #0f172a; --surface: #1e293b; --surface2: #334155;
+        --border: #475569; --text: #e2e8f0; --text-muted: #94a3b8;
+        --accent: #38bdf8; --accent-hover: #7dd3fc; --green: #4ade80;
+        --red: #f87171; --yellow: #fbbf24; --purple: #c084fc;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        background: var(--bg); color: var(--text); line-height: 1.6;
+        padding: 2rem; max-width: 1600px; margin: 0 auto;
+    }
+    h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; color: var(--accent); }
+    .report-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 2rem; }
+    .summary-grid {
+        display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 1rem; margin-bottom: 2rem;
+    }
+    .summary-card {
+        background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+        padding: 1.25rem; text-align: center;
+    }
+    .summary-card .value { font-size: 2rem; font-weight: 700; color: var(--accent); }
+    .summary-card .label { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    .machine-section {
+        background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+        margin-bottom: 1rem; overflow: hidden;
+    }
+    .machine-header {
+        padding: 1rem 1.25rem; cursor: pointer; font-size: 1.1rem; font-weight: 600;
+        display: flex; align-items: center; gap: 0.75rem; user-select: none;
+        transition: background 0.15s;
+    }
+    .machine-header:hover { background: var(--surface2); }
+    .chevron { transition: transform 0.2s; font-size: 0.75rem; }
+    .machine-header.open .chevron { transform: rotate(90deg); }
+    .machine-body { padding: 0 1.25rem 1.25rem; }
+    .badge {
+        font-size: 0.7rem; padding: 0.2rem 0.6rem; border-radius: 9999px;
+        font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em;
+    }
+    .badge-ok { background: rgba(74,222,128,0.15); color: var(--green); }
+    .badge-err { background: rgba(248,113,113,0.15); color: var(--red); }
+    .badge-info { background: rgba(56,189,248,0.12); color: var(--accent); }
+    .error-box {
+        background: rgba(248,113,113,0.1); border: 1px solid var(--red);
+        border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem;
+        color: var(--red); font-size: 0.85rem;
+    }
+    .table-controls { margin-bottom: 0.75rem; }
+    .search-box {
+        background: var(--bg); color: var(--text); border: 1px solid var(--border);
+        border-radius: 6px; padding: 0.5rem 0.75rem; font-size: 0.85rem; width: 300px;
+    }
+    .search-box:focus { outline: none; border-color: var(--accent); }
+    .session-table {
+        width: 100%; border-collapse: collapse; font-size: 0.82rem;
+    }
+    .session-table th {
+        background: var(--bg); padding: 0.6rem 0.75rem; text-align: left;
+        font-weight: 600; border-bottom: 2px solid var(--border); cursor: pointer;
+        white-space: nowrap; position: sticky; top: 0; user-select: none;
+    }
+    .session-table th:hover { color: var(--accent); }
+    .session-table td {
+        padding: 0.5rem 0.75rem; border-bottom: 1px solid rgba(71,85,105,0.4);
+        white-space: nowrap;
+    }
+    .row-even { background: transparent; }
+    .row-odd { background: rgba(255,255,255,0.02); }
+    .session-table tr:hover { background: rgba(56,189,248,0.06); }
+    .notes-cell { max-width: 250px; white-space: normal; font-size: 0.78rem; color: var(--text-muted); }
+    .btn-detail {
+        background: transparent; color: var(--accent); border: 1px solid var(--accent);
+        border-radius: 4px; padding: 0.2rem 0.6rem; cursor: pointer; font-size: 0.75rem;
+        transition: all 0.15s;
+    }
+    .btn-detail:hover { background: var(--accent); color: var(--bg); }
+    .detail-row td { padding: 0 !important; }
+    .timeline-box {
+        background: var(--bg); padding: 1rem; border-top: 1px solid var(--border);
+    }
+    .timeline-meta {
+        font-size: 0.78rem; color: var(--text-muted); margin-bottom: 0.75rem;
+    }
+    .timeline-meta code {
+        background: var(--surface2); padding: 0.1rem 0.4rem; border-radius: 3px;
+        font-size: 0.76rem;
+    }
+    .timeline-table {
+        width: 100%; border-collapse: collapse; font-size: 0.78rem;
+    }
+    .timeline-table th {
+        background: var(--surface2); padding: 0.4rem 0.6rem; text-align: left;
+        font-weight: 600;
+    }
+    .timeline-table td { padding: 0.35rem 0.6rem; border-bottom: 1px solid rgba(71,85,105,0.3); }
+    .evt-badge {
+        display: inline-block; padding: 0.1rem 0.4rem; border-radius: 3px;
+        font-size: 0.7rem; font-weight: 700; margin-right: 0.3rem;
+    }
+    .evt-4624 { background: rgba(74,222,128,0.2); color: var(--green); }
+    .evt-4634, .evt-4647 { background: rgba(248,113,113,0.2); color: var(--red); }
+    .evt-4778 { background: rgba(56,189,248,0.2); color: var(--accent); }
+    .evt-4779 { background: rgba(251,191,36,0.2); color: var(--yellow); }
+    .evt-4800 { background: rgba(192,132,252,0.2); color: var(--purple); }
+    .evt-4801 { background: rgba(192,132,252,0.15); color: var(--purple); }
+    .conf-high { color: var(--green); font-weight: 600; }
+    .conf-med { color: var(--yellow); }
+    .conf-low { color: var(--red); font-style: italic; }
+    .no-data { color: var(--text-muted); font-style: italic; padding: 1rem 0; }
+    footer {
+        margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--border);
+        color: var(--text-muted); font-size: 0.75rem; text-align: center;
+    }
+    @media (max-width: 1024px) {
+        body { padding: 1rem; }
+        .session-table { font-size: 0.75rem; }
+        .session-table td, .session-table th { padding: 0.4rem; }
+    }
+</style>
+</head>
+<body>
+
+<h1>Windows Logon Session Report</h1>
+<div class="report-meta">
+    Generated: 2026-02-17 19:36:58 UTC |
+    Query window: 2026-02-10 06:00 &ndash; 2026-02-17 19:36 UTC
+</div>
+
+<div class="summary-grid">
+    <div class="summary-card"><div class="value">1</div><div class="label">Machines Queried</div></div>
+    <div class="summary-card"><div class="value" style="color:var(--green);">0</div><div class="label">Successful</div></div>
+    <div class="summary-card"><div class="value" style="color:var(--red);">1</div><div class="label">Failed</div></div>
+    <div class="summary-card"><div class="value">0</div><div class="label">Total Sessions</div></div>
+</div>
+
+
+
+<footer>
+    Windows Logon Session Report &bull; Generated by Get-LogonSessionReport.ps1 &bull; All times in UTC
+</footer>
+
+<script>
+function toggleSection(el) {
+    el.classList.toggle('open');
+    const body = el.nextElementSibling;
+    body.style.display = body.style.display === 'none' ? 'block' : 'none';
+}
+
+function toggleDetail(id) {
+    const row = document.getElementById(id);
+    if (row) row.style.display = row.style.display === 'none' ? 'table-row' : 'none';
+}
+
+function filterTable(input) {
+    const filter = input.value.toLowerCase();
+    const table = input.closest('.machine-body').querySelector('.session-table');
+    if (!table) return;
+    const rows = table.querySelectorAll('tbody > tr:not(.detail-row)');
+    rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        const show = text.includes(filter);
+        row.style.display = show ? '' : 'none';
+        // Also hide the detail row if filtering hides the parent
+        const next = row.nextElementSibling;
+        if (next && next.classList.contains('detail-row') && !show) {
+            next.style.display = 'none';
+        }
+    });
+}
+
+function sortTable(th) {
+    const table = th.closest('table');
+    const tbody = table.querySelector('tbody');
+    const colIdx = Array.from(th.parentNode.children).indexOf(th);
+    const sortType = th.dataset.sort || 'string';
+    const dir = th.dataset.dir === 'asc' ? 'desc' : 'asc';
+    th.dataset.dir = dir;
+
+    // Collect data rows (skip detail rows)
+    const pairs = [];
+    const rows = Array.from(tbody.children);
+    for (let i = 0; i < rows.length; i++) {
+        if (!rows[i].classList.contains('detail-row')) {
+            pairs.push({ data: rows[i], detail: rows[i + 1]?.classList.contains('detail-row') ? rows[i + 1] : null });
+            if (rows[i + 1]?.classList.contains('detail-row')) i++;
+        }
+    }
+
+    pairs.sort((a, b) => {
+        const cellA = a.data.children[colIdx];
+        const cellB = b.data.children[colIdx];
+        let valA = cellA.dataset.value || cellA.textContent.trim();
+        let valB = cellB.dataset.value || cellB.textContent.trim();
+        let cmp = 0;
+        if (sortType === 'number') { cmp = (parseFloat(valA) || 0) - (parseFloat(valB) || 0); }
+        else if (sortType === 'date') { cmp = (new Date(valA) || 0) - (new Date(valB) || 0); }
+        else { cmp = valA.localeCompare(valB); }
+        return dir === 'asc' ? cmp : -cmp;
+    });
+
+    pairs.forEach(p => {
+        tbody.appendChild(p.data);
+        if (p.detail) tbody.appendChild(p.detail);
+    });
+}
+
+// Auto-expand first machine section if only one
+document.addEventListener('DOMContentLoaded', () => {
+    const headers = document.querySelectorAll('.machine-header');
+    if (headers.length === 1) headers[0].click();
+});
+</script>
+
+</body>
+</html>

@@ -95,9 +95,9 @@ function Update-HTMLLog {
         </div>
         <div class="status-bar">
             <div style="display: flex; align-items: center; gap: 10px;">
-                <button onclick="document.getElementById('logContainer').scrollTop = 0" style="padding: 8px 18px; font-size: 1em; border-radius: 6px; border: none; background: #10B981; color: white; font-weight: bold; cursor: pointer; transition: all 0.3s;">⏮ First</button>
-                <button onclick="location.reload()" style="padding: 8px 18px; font-size: 1em; border-radius: 6px; border: none; background: #3B82F6; color: white; font-weight: bold; cursor: pointer; transition: all 0.3s;">🔄 Refresh</button>
-                <button onclick="var lc = document.getElementById('logContainer'); lc.scrollTop = lc.scrollHeight" style="padding: 8px 18px; font-size: 1em; border-radius: 6px; border: none; background: #F59E0B; color: white; font-weight: bold; cursor: pointer; transition: all 0.3s;">⏭ Last</button>
+                <button onclick="window.scrollTo(0,0)" style="padding: 8px 18px; font-size: 1em; border-radius: 6px; border: none; background: #10B981; color: white; font-weight: bold; cursor: pointer;">⏮ First</button>
+                <button onclick="location.reload()" style="padding: 8px 18px; font-size: 1em; border-radius: 6px; border: none; background: #3B82F6; color: white; font-weight: bold; cursor: pointer;">🔄 Refresh</button>
+                <button onclick="window.scrollTo(0,document.body.scrollHeight)" style="padding: 8px 18px; font-size: 1em; border-radius: 6px; border: none; background: #F59E0B; color: white; font-weight: bold; cursor: pointer;">⏭ Last</button>
             </div>
             <div>
                 <span>Session: $sessionTime | Last Update: $lastUpdate</span>
@@ -142,9 +142,6 @@ $logEntriesHtml
         
         filterLog();
     </script>
-    <div style="text-align: center; padding: 20px; color: #666; font-size: 12px;">
-        David Andrews Copyright 2025 - All Rights Reserved
-    </div>
 </body>
 </html>
 "@
@@ -154,7 +151,7 @@ $logEntriesHtml
         # Silently ignore errors during HTML update to avoid recursive logging
     }
 }
-function New-HTMLActivityLog {
+function Generate-HTMLActivityLog {
     $now = Get-Date
     $fileName = "VeeamItUpPlusLog-" + $now.ToString("yyyy-MMM-dd-ddd-hhmmtt").Replace(":","") + ".html"
     $downloads = if ($env:USERPROFILE) { 
@@ -276,16 +273,13 @@ function New-HTMLActivityLog {
             logContainer.scrollTop = logContainer.scrollHeight;
         });
     </script>
-    <div style="text-align: center; padding: 20px; color: #666; font-size: 12px;">
-        David Andrews Copyright 2025 - All Rights Reserved
-    </div>
 </body>
 </html>
 "@
     $html | Out-File -FilePath $logPath -Encoding UTF8 -Force
     Write-Log "HTML activity log generated: $logPath" 'SUCCESS'
 }
-function Limit-LogHistory {
+function Keep-LastNLogs {
     param($N)
     $downloads = if ($env:USERPROFILE) { 
         Join-Path $env:USERPROFILE "Downloads" 
@@ -1062,7 +1056,7 @@ function Show-Banner {
     Write-Host "${esc}[40;92m|                                                                              |${esc}[0m"
     Write-Host "${esc}[40;92m|                          VeeamItUp+                                          |${esc}[0m"
     Write-Host "${esc}[40;92m|                                                                              |${esc}[0m"
-    Write-Host "${esc}[40;92m|   Version 1.2.0   |   Author: David Andrews   |   All Rights Reserved© $year  |${esc}[0m"
+    Write-Host "${esc}[40;92m|   Version 1.0.0   |   Author: David Andrews   |   All Rights Reserved© $year  |${esc}[0m"
     Write-Host "${esc}[40;92m|                                                                              |${esc}[0m"
     Write-Host "${esc}[40;92m+------------------------------------------------------------------------------+${esc}[0m"
     
@@ -1453,7 +1447,7 @@ function Analyze-BackupRetention {
         OldestBackup = $null
         NewestBackup = $null
         RetentionPoints = 0
-        RetentionSpanDays = 0  # Days between oldest and newest backup
+        RetentionDays = 0
         BackupFrequency = @{
             Daily = 0
             Weekly = 0
@@ -1479,8 +1473,7 @@ function Analyze-BackupRetention {
     if ($sortedBackups -and $sortedBackups.Count -gt 0) {
         $analysis.OldestBackup = $sortedBackups[0].LastWriteTime
         $analysis.NewestBackup = $sortedBackups[-1].LastWriteTime
-        # Add 1 to include both the first and last day in the span
-        $analysis.RetentionSpanDays = ($analysis.NewestBackup - $analysis.OldestBackup).Days + 1
+        $analysis.RetentionDays = ($analysis.NewestBackup - $analysis.OldestBackup).Days
     }
     $analysis.RetentionPoints = $BackupFiles.Count
     
@@ -1757,7 +1750,7 @@ function Analyze-GFSCompliance {
         
         $oldestDate = $validDates | Sort-Object | Select-Object -First 1
         $newestDate = $validDates | Sort-Object | Select-Object -Last 1
-        $retentionSpan = ($newestDate - $oldestDate).Days + 1
+        $retentionSpan = ($newestDate - $oldestDate).Days
         
         # Analyze daily retention (last 7 days, not including today)
         $last7Days = $newestDate.AddDays(-6).Date  # Go back 6 days to get 7 days total including newest
@@ -1827,48 +1820,23 @@ function Analyze-GFSCompliance {
             Details = $monthlyBackups
         }
         
-        # Analyze yearly retention (last 7 years)
-        $yearlyBackups = @{}
-        for ($i = 0; $i -lt 7; $i++) {
-            $yearDate = $newestDate.AddYears(-$i)
-            $yearKey = $yearDate.ToString("yyyy")
-            
-            $yearBackups = $backupDates.Keys | Where-Object {
-                $_ -like "$yearKey-*"
-            }
-            
-            if ($yearBackups.Count -gt 0) {
-                $yearlyBackups[$yearKey] = $yearBackups.Count
-            }
-        }
-        
-        $analysis.GFSCompliance.YearlyRetention = @{
-            Expected = 7
-            Actual = $yearlyBackups.Count
-            Coverage = [math]::Round(($yearlyBackups.Count / 7) * 100, 1)
-            Details = $yearlyBackups
-        }
-        
-        # Calculate GFS compliance score (adjusted weights for yearly)
+        # Calculate GFS compliance score
         $dailyScore = $analysis.GFSCompliance.DailyRetention.Coverage
         $weeklyScore = $analysis.GFSCompliance.WeeklyRetention.Coverage
         $monthlyScore = $analysis.GFSCompliance.MonthlyRetention.Coverage
-        $yearlyScore = $analysis.GFSCompliance.YearlyRetention.Coverage
         
-        # Weights: Daily 30%, Weekly 20%, Monthly 25%, Yearly 25%
-        $analysis.GFSCompliance.Score = [math]::Round(($dailyScore * 0.3 + $weeklyScore * 0.2 + $monthlyScore * 0.25 + $yearlyScore * 0.25), 1)
+        $analysis.GFSCompliance.Score = [math]::Round(($dailyScore * 0.4 + $weeklyScore * 0.3 + $monthlyScore * 0.3), 1)
         
-        # Assign grade (use break to ensure only one grade is assigned)
-        $score = [int]$analysis.GFSCompliance.Score
-        $analysis.GFSCompliance.Grade = switch ($score) {
-            {$_ -ge 95} { "A+"; break }
-            {$_ -ge 90} { "A"; break }
-            {$_ -ge 85} { "B+"; break }
-            {$_ -ge 80} { "B"; break }
-            {$_ -ge 75} { "C+"; break }
-            {$_ -ge 70} { "C"; break }
-            {$_ -ge 65} { "D+"; break }
-            {$_ -ge 60} { "D"; break }
+        # Assign grade
+        $analysis.GFSCompliance.Grade = switch ([int]$analysis.GFSCompliance.Score) {
+            {$_ -ge 95} { "A+" }
+            {$_ -ge 90} { "A" }
+            {$_ -ge 85} { "B+" }
+            {$_ -ge 80} { "B" }
+            {$_ -ge 75} { "C+" }
+            {$_ -ge 70} { "C" }
+            {$_ -ge 65} { "D+" }
+            {$_ -ge 60} { "D" }
             default { "F" }
         }
     }
@@ -1987,13 +1955,11 @@ function Get-VerboseStorageRecommendations {
                 "Daily Coverage: $($GFSAnalysis.GFSCompliance.DailyRetention.Coverage)% - $($GFSAnalysis.GFSCompliance.DailyRetention.Actual) of $($GFSAnalysis.GFSCompliance.DailyRetention.Expected) days"
                 "Weekly Coverage: $($GFSAnalysis.GFSCompliance.WeeklyRetention.Coverage)% - $($GFSAnalysis.GFSCompliance.WeeklyRetention.Actual) of $($GFSAnalysis.GFSCompliance.WeeklyRetention.Expected) weeks"
                 "Monthly Coverage: $($GFSAnalysis.GFSCompliance.MonthlyRetention.Coverage)% - $($GFSAnalysis.GFSCompliance.MonthlyRetention.Actual) of $($GFSAnalysis.GFSCompliance.MonthlyRetention.Expected) months"
-                "Yearly Coverage: $($GFSAnalysis.GFSCompliance.YearlyRetention.Coverage)% - $($GFSAnalysis.GFSCompliance.YearlyRetention.Actual) of $($GFSAnalysis.GFSCompliance.YearlyRetention.Expected) years"
             )
             Actions = @(
                 "Review and adjust backup job schedules to ensure daily backups"
                 "Configure weekly full backups to maintain at least 4 weekly restore points"
                 "Implement monthly archival to maintain 12 months of recovery capability"
-                "Configure yearly archival to maintain 7 years for compliance requirements"
                 "Consider implementing Veeam's built-in GFS retention policy settings"
             )
         }
@@ -2114,15 +2080,6 @@ function Get-ComprehensiveMachineAnalysis {
         VeeamSpecificRecommendations = @()
         ComplianceScore = 0
         RiskLevel = "Low"
-        RetentionDays = 0
-        BackupFrequency = "Unknown"
-        TotalBackups = 0
-        FullBackupCount = 0
-        IncrementalCount = 0
-        TotalStorageUsed = 0
-        AvgBackupSize = 0
-        DedupRatio = 0
-        CompressionRatio = 0
     }
     
     # Analyze machine characteristics
@@ -2185,7 +2142,7 @@ function Get-ComprehensiveMachineAnalysis {
         if ($dates.Count -gt 0) {
             $oldestBackup = $dates[0]
             $newestBackup = $dates[-1]
-            $retentionDays = if ($oldestBackup -eq $newestBackup) { 1 } else { ($newestBackup - $oldestBackup).Days + 1 }
+            $retentionDays = if ($oldestBackup -eq $newestBackup) { 1 } else { ($newestBackup - $oldestBackup).Days }
         } elseif ($MachineData.VBMMetadata -and $MachineData.VBMMetadata.Storages) {
             # If no dates from backup files, try to get from VBM metadata
             $vbmDates = $MachineData.VBMMetadata.Storages | ForEach-Object { 
@@ -2199,7 +2156,7 @@ function Get-ComprehensiveMachineAnalysis {
             if ($vbmDates.Count -gt 0) {
                 $oldestBackup = $vbmDates[0]
                 $newestBackup = $vbmDates[-1]
-                $retentionDays = if ($oldestBackup -eq $newestBackup) { 1 } else { ($newestBackup - $oldestBackup).Days + 1 }
+                $retentionDays = if ($oldestBackup -eq $newestBackup) { 1 } else { ($newestBackup - $oldestBackup).Days }
                 $dates = $vbmDates  # Use VBM dates for frequency calculation
             }
         }
@@ -2342,8 +2299,8 @@ function Get-ComprehensiveMachineAnalysis {
         "Total backups: $totalBackups ($fullBackupCount full, $incrementalCount incremental)"
         "Backup frequency: $backupFrequency"
         "Retention period: $retentionDays days"
-        "Average backup size: $(Format-StorageSize $avgBackupSize)"
-        "Total storage used: $(Format-StorageSize $totalStorageUsed)"
+        "Average backup size: $('{0:N2}' -f $avgBackupSize) GB"
+        "Total storage used: $('{0:N2}' -f $totalStorageUsed) GB"
         "Deduplication ratio: $dedupRatio%"
         "Compression ratio: $compressionRatio%"
     )
@@ -2512,15 +2469,15 @@ function Get-ComprehensiveMachineAnalysis {
     $summaryVariations = @{
         Opening = @(
             "The backup infrastructure for $MachineName demonstrates a $($backupFrequency.ToLower()) backup schedule with $totalBackups total backup points spanning $retentionDays days",
-            "Analysis of $MachineName reveals a $($backupFrequency.ToLower()) protection cadence encompassing $totalBackups restore points across a $retentionDays-day retention window",
-            "$MachineName operates on a $($backupFrequency.ToLower()) backup cycle, maintaining $totalBackups recovery points over a $retentionDays-day period",
-            "The $MachineName backup ecosystem employs $($backupFrequency.ToLower()) protection, preserving $totalBackups backup instances within a $retentionDays-day timeframe"
+            "Analysis of $MachineName reveals a $($backupFrequency.ToLower()) protection cadence encompassing $totalBackups restore points across a $($retentionDays + 1)-day retention window",
+            "$MachineName operates on a $($backupFrequency.ToLower()) backup cycle, maintaining $totalBackups recovery points over a $($retentionDays + 1)-day period",
+            "The $MachineName backup ecosystem employs $($backupFrequency.ToLower()) protection, preserving $totalBackups backup instances within a $($retentionDays + 1)-day timeframe"
         )
         Storage = @(
-            "The system maintains $fullBackupCount full backups and $incrementalCount incremental backups, consuming approximately $(Format-StorageSize $totalStorageUsed) of storage with an average backup size of $(Format-StorageSize $avgBackupSize)",
-            "Repository utilization includes $fullBackupCount full and $incrementalCount incremental backups, occupying $(Format-StorageSize $totalStorageUsed) total with typical backup sizes averaging $(Format-StorageSize $avgBackupSize)",
-            "Storage allocation comprises $fullBackupCount complete backups plus $incrementalCount incremental copies, totaling $(Format-StorageSize $totalStorageUsed) with mean backup footprints of $(Format-StorageSize $avgBackupSize)",
-            "The backup repository houses $fullBackupCount full images alongside $incrementalCount incremental snapshots, collectively requiring $(Format-StorageSize $totalStorageUsed) while averaging $(Format-StorageSize $avgBackupSize) per backup"
+            "The system maintains $fullBackupCount full backups and $incrementalCount incremental backups, consuming approximately $('{0:N2}' -f $totalStorageUsed) GB of storage with an average backup size of $('{0:N2}' -f $avgBackupSize) GB",
+            "Repository utilization includes $fullBackupCount full and $incrementalCount incremental backups, occupying $('{0:N2}' -f $totalStorageUsed) GB total with typical backup sizes averaging $('{0:N2}' -f $avgBackupSize) GB",
+            "Storage allocation comprises $fullBackupCount complete backups plus $incrementalCount incremental copies, totaling $('{0:N2}' -f $totalStorageUsed) GB with mean backup footprints of $('{0:N2}' -f $avgBackupSize) GB",
+            "The backup repository houses $fullBackupCount full images alongside $incrementalCount incremental snapshots, collectively requiring $('{0:N2}' -f $totalStorageUsed) GB while averaging $('{0:N2}' -f $avgBackupSize) GB per backup"
         )
         ComplianceGood = @(
             "The GFS retention compliance score of $($analysis.ComplianceScore)% indicates good adherence to retention policies",
@@ -2612,68 +2569,7 @@ function Get-ComprehensiveMachineAnalysis {
         $para2 += $summaryVariations.Recommendations[(Get-Random -Maximum $summaryVariations.Recommendations.Count)] + ": $($topRecommendations -join ', ')."
     }
     
-    # Create formatted HTML summary with bullet points
-    $formattedSummary = @"
-<div style='font-size: 1.05em; color: #475569;'>
-    <h5 style='margin: 0 0 15px 0; color: #1e293b; font-size: 1.1em; font-weight: 600;'>📊 Backup Infrastructure Overview</h5>
-    <ul style='list-style: none; padding: 0; margin: 0 0 20px 0;'>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: #10b981; font-size: 1.2em; margin-right: 10px;'>✅</span> <strong>Backup Schedule: </strong> $($backupFrequency) protection with $totalBackups backup points</li>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: $(if ($retentionDays -ge 30) { '#10b981' } else { '#ef4444' }); font-size: 1.2em; margin-right: 10px;'>$(if ($retentionDays -ge 30) { '✅' } else { '❌' })</span> <strong>Retention Window: </strong> $retentionDays days $(if ($retentionDays -lt 30) { '(Below recommended 30-day minimum)' } else { '(Meets retention requirements)' })</li>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: #10b981; font-size: 1.2em; margin-right: 10px;'>✅</span> <strong>Backup Types: </strong> $fullBackupCount full backups + $incrementalCount incremental backups</li>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: #10b981; font-size: 1.2em; margin-right: 10px;'>✅</span> <strong>Storage Usage: </strong> $(Format-StorageSize $totalStorageUsed) total ($(Format-StorageSize $avgBackupSize) average)</li>
-    </ul>
-    
-    <h5 style='margin: 20px 0 15px 0; color: #1e293b; font-size: 1.1em; font-weight: 600;'>⚡ Storage Optimization Metrics</h5>
-    <ul style='list-style: none; padding: 0; margin: 0 0 20px 0;'>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: $(if ($analysis.ComplianceScore -ge 80) { '#10b981' } else { '#ef4444' }); font-size: 1.2em; margin-right: 10px;'>$(if ($analysis.ComplianceScore -ge 80) { '✅' } else { '❌' })</span> <strong>GFS Compliance: </strong> $($analysis.ComplianceScore)% $(if ($analysis.ComplianceScore -ge 80) { '(Excellent adherence)' } elseif ($analysis.ComplianceScore -ge 60) { '(Good adherence)' } else { '(Needs improvement)' })</li>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: $(if ($dedupRatio -ge 50) { '#10b981' } else { '#ef4444' }); font-size: 1.2em; margin-right: 10px;'>$(if ($dedupRatio -ge 50) { '✅' } else { '❌' })</span> <strong>Deduplication Ratio: </strong> $dedupRatio% $(if ($dedupRatio -ge 70) { '(Excellent efficiency)' } elseif ($dedupRatio -ge 50) { '(Good efficiency)' } else { '(Below optimal)' })</li>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: $(if ($compressionRatio -ge 30) { '#10b981' } else { '#f59e0b' }); font-size: 1.2em; margin-right: 10px;'>$(if ($compressionRatio -ge 30) { '✅' } else { '⚠️' })</span> <strong>Compression Ratio: </strong> $compressionRatio% $(if ($compressionRatio -ge 40) { '(Excellent compression)' } elseif ($compressionRatio -ge 30) { '(Good compression)' } else { '(Average compression)' })</li>
-    </ul>
-    
-    <h5 style='margin: 20px 0 15px 0; color: #1e293b; font-size: 1.1em; font-weight: 600;'>🎯 Risk Assessment & Status</h5>
-    <ul style='list-style: none; padding: 0; margin: 0;'>
-        <li style='padding: 8px 0; display: flex; align-items: center;'><span style='color: $(if ($analysis.RiskLevel -eq 'Low') { '#10b981' } elseif ($analysis.RiskLevel -eq 'Medium') { '#f59e0b' } else { '#ef4444' }); font-size: 1.2em; margin-right: 10px;'>$(if ($analysis.RiskLevel -eq 'Low') { '✅' } elseif ($analysis.RiskLevel -eq 'Medium') { '⚠️' } else { '❌' })</span> <strong>Overall Risk Level: </strong> $($analysis.RiskLevel) $(if ($analysis.RiskLevel -eq 'Low') { '(System operating optimally)' } elseif ($analysis.RiskLevel -eq 'Medium') { '(Some attention required)' } else { '(Immediate action needed)' })</li>
-"@
-
-    # Add problems if any
-    if ($analysis.Problems.Count -gt 0) {
-        $formattedSummary += @"
-        <li style='padding: 8px 0 8px 0;'><strong style='color: #dc2626;'>⚠️ Areas Requiring Attention: </strong></li>
-"@
-        foreach ($problem in $analysis.Problems) {
-            $formattedSummary += @"
-        <li style='padding: 4px 0 4px 40px; display: flex; align-items: center;'><span style='color: #ef4444; font-size: 1em; margin-right: 10px;'>❌</span> $problem</li>
-"@
-        }
-    }
-    
-    # Add benefits if any
-    if ($analysis.Benefits.Count -gt 0) {
-        $formattedSummary += @"
-        <li style='padding: 8px 0 8px 0;'><strong style='color: #059669;'>💪 Key Strengths: </strong></li>
-"@
-        foreach ($benefit in $analysis.Benefits) {
-            $formattedSummary += @"
-        <li style='padding: 4px 0 4px 40px; display: flex; align-items: center;'><span style='color: #10b981; font-size: 1em; margin-right: 10px;'>✅</span> $benefit</li>
-"@
-        }
-    }
-    
-    $formattedSummary += @"
-    </ul>
-</div>
-"@
-    
-    $analysis.MachineSummary = $formattedSummary
-    $analysis.RetentionDays = $retentionDays
-    $analysis.BackupFrequency = $backupFrequency
-    $analysis.TotalBackups = $totalBackups
-    $analysis.FullBackupCount = $fullBackupCount
-    $analysis.IncrementalCount = $incrementalCount
-    $analysis.TotalStorageUsed = $totalStorageUsed
-    $analysis.AvgBackupSize = $avgBackupSize
-    $analysis.DedupRatio = $dedupRatio
-    $analysis.CompressionRatio = $compressionRatio
+    $analysis.MachineSummary = "$para1`n$para2"
     
     return $analysis
 }
@@ -4023,147 +3919,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                 </div>
                             </div>
                         </div>
-                        
-                        <!-- GFS Storage Projection Section -->
-                        <div style="margin-top: 30px; padding: 25px; background: linear-gradient(135deg, #ede9fe 0%, #f3e8ff 100%); border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);">
-                            <h3 style="margin: 0 0 20px 0; color: #581c87; font-size: 1.3em; text-align: center;">
-                                📊 GFS Storage Projection - Full Compliance Requirements
-                            </h3>
-                            <p style="color: #6b21a8; text-align: center; margin-bottom: 20px; font-size: 0.95em;">
-                                Estimated storage requirements if all machines maintained full GFS retention (7 daily, 4 weekly, 12 monthly, 4 quarterly, 7 yearly)
-                            </p>
-"@
-                            
-                            # Build GFS projection table
-                            $html += @"
-                            <div style="overflow-x: auto;">
-                                <table style="width: 100%; border-collapse: collapse; background: white; border-radius: 8px; overflow: hidden;">
-                                    <thead>
-                                        <tr style="background: linear-gradient(135deg, #7c3aed, #6d28d9);">
-                                            <th style="padding: 12px; text-align: left; color: white; font-weight: 600; border-right: 1px solid rgba(255,255,255,0.2);">Machine Name</th>
-                                            <th style="padding: 12px; text-align: right; color: white; font-weight: 600; border-right: 1px solid rgba(255,255,255,0.2);">Daily (7)</th>
-                                            <th style="padding: 12px; text-align: right; color: white; font-weight: 600; border-right: 1px solid rgba(255,255,255,0.2);">Weekly (4)</th>
-                                            <th style="padding: 12px; text-align: right; color: white; font-weight: 600; border-right: 1px solid rgba(255,255,255,0.2);">Monthly (12)</th>
-                                            <th style="padding: 12px; text-align: right; color: white; font-weight: 600; border-right: 1px solid rgba(255,255,255,0.2);">Quarterly (4)</th>
-                                            <th style="padding: 12px; text-align: right; color: white; font-weight: 600; border-right: 1px solid rgba(255,255,255,0.2);">Yearly (7)</th>
-                                            <th style="padding: 12px; text-align: right; color: white; font-weight: 600;">Total Required</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-"@
-                            
-                            # Calculate projections for each machine
-                            $totalDaily = 0
-                            $totalWeekly = 0
-                            $totalMonthly = 0
-                            $totalQuarterly = 0
-                            $totalYearly = 0
-                            $grandTotal = 0
-                            
-                            $sortedMachines = $repository.Machines.GetEnumerator() | Sort-Object { $_.Value.TotalSizeGB } -Descending
-                            $rowCount = 0
-                            
-                            foreach ($machine in $sortedMachines) {
-                                $machineName = $machine.Key
-                                $machineData = $machine.Value
-                                
-                                # Calculate average sizes
-                                $avgFullSize = if ($machineData.FullBackups.Count -gt 0) {
-                                    ($machineData.FullBackups | Measure-Object -Property SizeGB -Average).Average
-                                } else {
-                                    $machineData.TotalSizeGB * 0.4  # Estimate
-                                }
-                                
-                                $avgIncrementalSize = if ($machineData.IncrementalBackups.Count -gt 0) {
-                                    ($machineData.IncrementalBackups | Measure-Object -Property SizeGB -Average).Average
-                                } else {
-                                    $machineData.TotalSizeGB * 0.1  # Estimate
-                                }
-                                
-                                # Calculate GFS requirements
-                                $dailyReq = [math]::Round(7 * $avgIncrementalSize, 2)
-                                $weeklyReq = [math]::Round(4 * $avgFullSize, 2)
-                                $monthlyReq = [math]::Round(12 * $avgFullSize, 2)
-                                $quarterlyReq = [math]::Round(4 * $avgFullSize, 2)
-                                $yearlyReq = [math]::Round(7 * $avgFullSize, 2)
-                                $machineTotal = [math]::Round($dailyReq + $weeklyReq + $monthlyReq + $quarterlyReq + $yearlyReq, 2)
-                                
-                                # Add to totals
-                                $totalDaily += $dailyReq
-                                $totalWeekly += $weeklyReq
-                                $totalMonthly += $monthlyReq
-                                $totalQuarterly += $quarterlyReq
-                                $totalYearly += $yearlyReq
-                                $grandTotal += $machineTotal
-                                
-                                $rowColor = if ($rowCount % 2 -eq 0) { "#f8f9fa" } else { "#ffffff" }
-                                $rowCount++
-                                
-                                $html += @"
-                                        <tr style="background: $rowColor; border-bottom: 1px solid #e5e7eb;">
-                                            <td style="padding: 10px; font-weight: 500; color: #1e293b; border-right: 1px solid #e5e7eb;">
-                                                <span style="display: flex; align-items: center;">
-                                                    <span style="font-size: 1.2em; margin-right: 8px;">💻</span>
-                                                    $machineName
-                                                </span>
-                                            </td>
-                                            <td style="padding: 10px; text-align: right; color: #64748b; border-right: 1px solid #e5e7eb;">$(Format-StorageSize $dailyReq)</td>
-                                            <td style="padding: 10px; text-align: right; color: #64748b; border-right: 1px solid #e5e7eb;">$(Format-StorageSize $weeklyReq)</td>
-                                            <td style="padding: 10px; text-align: right; color: #64748b; border-right: 1px solid #e5e7eb;">$(Format-StorageSize $monthlyReq)</td>
-                                            <td style="padding: 10px; text-align: right; color: #64748b; border-right: 1px solid #e5e7eb;">$(Format-StorageSize $quarterlyReq)</td>
-                                            <td style="padding: 10px; text-align: right; color: #64748b; border-right: 1px solid #e5e7eb;">$(Format-StorageSize $yearlyReq)</td>
-                                            <td style="padding: 10px; text-align: right; font-weight: 600; color: #7c3aed;">$(Format-StorageSize $machineTotal)</td>
-                                        </tr>
-"@
-                            }
-                            
-                            # Add grand total row
-                            $html += @"
-                                        <tr style="background: linear-gradient(135deg, #f3e8ff, #ede9fe); border-top: 2px solid #7c3aed;">
-                                            <td style="padding: 12px; font-weight: 700; color: #581c87; border-right: 1px solid #d8b4fe;">
-                                                <span style="display: flex; align-items: center;">
-                                                    <span style="font-size: 1.3em; margin-right: 8px;">📊</span>
-                                                    GRAND TOTAL
-                                                </span>
-                                            </td>
-                                            <td style="padding: 12px; text-align: right; font-weight: 600; color: #6b21a8; border-right: 1px solid #d8b4fe;">$(Format-StorageSize $totalDaily)</td>
-                                            <td style="padding: 12px; text-align: right; font-weight: 600; color: #6b21a8; border-right: 1px solid #d8b4fe;">$(Format-StorageSize $totalWeekly)</td>
-                                            <td style="padding: 12px; text-align: right; font-weight: 600; color: #6b21a8; border-right: 1px solid #d8b4fe;">$(Format-StorageSize $totalMonthly)</td>
-                                            <td style="padding: 12px; text-align: right; font-weight: 600; color: #6b21a8; border-right: 1px solid #d8b4fe;">$(Format-StorageSize $totalQuarterly)</td>
-                                            <td style="padding: 12px; text-align: right; font-weight: 600; color: #6b21a8; border-right: 1px solid #d8b4fe;">$(Format-StorageSize $totalYearly)</td>
-                                            <td style="padding: 12px; text-align: right; font-weight: 700; font-size: 1.1em; color: #581c87;">$(Format-StorageSize $grandTotal)</td>
-                                        </tr>
-                                    </tbody>
-                                </table>
-                            </div>
-                            
-                            <!-- Summary Cards -->
-                            <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-top: 20px;">
-                                <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #7c3aed;">
-                                    <div style="color: #6b7280; font-size: 0.9em;">Current Usage</div>
-                                    <div style="color: #1e293b; font-size: 1.5em; font-weight: 700;">$(Format-StorageSize $repository.TotalSizeGB)</div>
-                                </div>
-                                <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #a78bfa;">
-                                    <div style="color: #6b7280; font-size: 0.9em;">Full GFS Required</div>
-                                    <div style="color: #7c3aed; font-size: 1.5em; font-weight: 700;">$(Format-StorageSize $grandTotal)</div>
-                                </div>
-                                <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #c4b5fd;">
-                                    <div style="color: #6b7280; font-size: 0.9em;">Additional Space Needed</div>
-                                    <div style="color: #a78bfa; font-size: 1.5em; font-weight: 700;">$(Format-StorageSize ([math]::Max(0, $grandTotal - $repository.TotalSizeGB)))</div>
-                                </div>
-                                <div style="background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #e9d5ff;">
-                                    <div style="color: #6b7280; font-size: 0.9em;">With 20% Growth Buffer</div>
-                                    <div style="color: #c084fc; font-size: 1.5em; font-weight: 700;">$(Format-StorageSize ($grandTotal * 1.2))</div>
-                                </div>
-                            </div>
-                            
-                            <div style="margin-top: 15px; padding: 15px; background: rgba(255,255,255,0.5); border-radius: 8px; border: 1px solid #d8b4fe;">
-                                <p style="margin: 0; color: #6b21a8; font-size: 0.9em;">
-                                    <strong>📌 Note:</strong> These projections assume full GFS compliance for all machines with standard retention periods. 
-                                    Actual requirements may vary based on backup job configurations, deduplication ratios, and compression efficiency.
-                                </p>
-                            </div>
-                        </div>
                     </div>
                     
                     <!-- Machines Tab -->
@@ -4482,7 +4237,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                 <table style="width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.9em; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
                                     <thead>
                                         <tr style="background: linear-gradient(135deg, #4f46e5 0%, #6366f1 100%); color: white;">
-                                            <th style="padding: 12px; text-align: center; font-weight: 600; width: 50px;">#</th>
                                             <th style="padding: 12px; text-align: left; font-weight: 600;">Type</th>
                                             <th style="padding: 12px; text-align: left; font-weight: 600;">File Name</th>
                                             <th style="padding: 12px; text-align: left; font-weight: 600;">Created</th>
@@ -4490,8 +4244,9 @@ document.addEventListener('DOMContentLoaded', function() {
                                             <th style="padding: 12px; text-align: right; font-weight: 600;">Data Size</th>
                                             <th style="padding: 12px; text-align: center; font-weight: 600;">Dedup</th>
                                             <th style="padding: 12px; text-align: center; font-weight: 600;">GFS</th>
-                                            <th style="padding: 12px; text-align: center; font-weight: 600;">GFS Type</th>
-                                            <th style="padding: 12px; text-align: center; font-weight: 600;">File-Health</th>
+                                            <th style="padding: 12px; text-align: center; font-weight: 600;">Partial</th>
+                                            <th style="padding: 12px; text-align: center; font-weight: 600;">Block</th>
+                                            <th style="padding: 12px; text-align: center; font-weight: 600;">Status</th>
                                             <th style="padding: 12px; text-align: left; font-weight: 600;">Issues</th>
                                         </tr>
                                     </thead>
@@ -4507,7 +4262,6 @@ document.addEventListener('DOMContentLoaded', function() {
                         }
                     } -Descending
                     
-                    $pointNumber = 1
                     foreach ($storage in $sortedStorages) {
                         $fileName = Split-Path -Leaf $storage.FilePath
                         
@@ -4575,24 +4329,11 @@ document.addEventListener('DOMContentLoaded', function() {
                         
                         # Format additional parameters with checkmarks for boolean values
                         $gfsIcon = if ($storage.GfsPeriod -and $storage.GfsPeriod -ne "" -and $storage.GfsPeriod -ne "0") { "✅" } else { "➖" }
-                        
-                        # Determine GFS Type based on GfsPeriod value
-                        $gfsType = switch ($storage.GfsPeriod) {
-                            "0" { "Regular" }
-                            ""  { "Regular" }
-                            "1" { "Weekly" }
-                            "2" { "Monthly" }
-                            "3" { "Quarterly" }
-                            "4" { "Yearly" }
-                            default { "Regular" }
-                        }
-                        
                         $partialIcon = if ($storage.PartialIncrement) { "✅" } else { "➖" }
                         $blockSizeText = if ($storage.BlockSize -gt 0) { "$($storage.BlockSize)KB" } else { "-" }
                         
                         $html += @"
                                         <tr style="$rowStyle transition: all 0.2s ease; cursor: pointer;" onmouseover="this.style.transform='translateX(4px)'; this.style.boxShadow='0 2px 4px rgba(0,0,0,0.1)';" onmouseout="this.style.transform='translateX(0)'; this.style.boxShadow='none';">
-                                            <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center; font-weight: bold; color: #4f46e5;">$pointNumber</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); font-weight: 500;">$typeIcon $($storage.Type)</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); font-weight: 500;">$fileName</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); font-size: 0.85em;">$creationDateText</td>
@@ -4600,12 +4341,12 @@ document.addEventListener('DOMContentLoaded', function() {
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: right; font-weight: 500;">$dataSizeText</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center;">$dedupText</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center; font-size: 1.1em;">$gfsIcon</td>
-                                            <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center; font-weight: 500;">$gfsType</td>
+                                            <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center; font-size: 1.1em;">$partialIcon</td>
+                                            <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center; font-size: 0.85em;">$blockSizeText</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); text-align: center;">$statusBadge</td>
                                             <td style="padding: 10px 12px; border-bottom: 1px solid rgba(226, 232, 240, 0.5); font-size: 0.85em;">$issuesText</td>
                                         </tr>
 "@
-                        $pointNumber++
                     }
                     
                     # Calculate totals for summary row
@@ -4635,13 +4376,13 @@ document.addEventListener('DOMContentLoaded', function() {
                     
                     $html += @"
                                         <tr style="background: linear-gradient(135deg, #f3f4f6 0%, #e5e7eb 100%); border-top: 2px solid #6366f1; font-weight: bold;">
-                                            <td colspan="4" style="padding: 12px; border-bottom: none; color: #1e293b;">
+                                            <td colspan="3" style="padding: 12px; border-bottom: none; color: #1e293b;">
                                                 TOTALS: $fullCount Full, $incrementalCount Incremental
                                             </td>
                                             <td style="padding: 12px; border-bottom: none; text-align: right; color: #1e293b; font-size: 1.05em;">$totalBackupSizeText</td>
                                             <td style="padding: 12px; border-bottom: none; text-align: right; color: #1e293b; font-size: 1.05em;">$totalDataSizeText</td>
                                             <td style="padding: 12px; border-bottom: none; text-align: center; color: #059669;">Avg: $avgDedupRatio%</td>
-                                            <td colspan="4" style="padding: 12px; border-bottom: none;"></td>
+                                            <td colspan="2" style="padding: 12px; border-bottom: none;"></td>
                                         </tr>
                                     </tbody>
                                 </table>
@@ -4657,226 +4398,17 @@ document.addEventListener('DOMContentLoaded', function() {
                     # Get comprehensive machine analysis with best practices
                     $comprehensiveAnalysis = Get-ComprehensiveMachineAnalysis -MachineData $machineData -GFSAnalysis $gfsAnalysis -VBMMetadata $machineData.VBMMetadata -MachineName $vmName
                     
-                    # Add modern Executive Summary section with cards
+                    # Add machine summary section (2 paragraphs)
                     $html += @"
-                            <!-- Executive Summary Section -->
-                            <div style="margin-top: 30px;">
-                                <!-- Section Header -->
-                                <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px 25px; border-radius: 16px 16px 0 0; box-shadow: 0 10px 30px rgba(102, 126, 234, 0.3);">
-                                    <h3 style="margin: 0; color: white; font-size: 1.5em; font-weight: 600; display: flex; align-items: center; gap: 12px;">
-                                        <span style="background: rgba(255, 255, 255, 0.2); padding: 8px; border-radius: 10px; display: inline-flex;">📊</span>
-                                        Executive Summary for $vmName
-                                        <span style="margin-left: auto; font-size: 0.6em; padding: 6px 16px; background: $(if ($comprehensiveAnalysis.RiskLevel -eq 'Critical') { '#ef4444' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'High') { '#f97316' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'Medium') { '#3b82f6' } else { '#10b981' }); color: white; border-radius: 30px; font-weight: 700; letter-spacing: 1px; box-shadow: 0 4px 12px rgba(0,0,0,0.2);">
-                                            RISK: $($comprehensiveAnalysis.RiskLevel.ToUpper())
-                                        </span>
-                                    </h3>
-                                </div>
-                                
-                                <!-- Key Metrics Cards -->
-                                <div style="background: #f8fafc; padding: 25px; border-radius: 0 0 16px 16px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);">
-                                    <!-- Quick Stats Row -->
-                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 25px;">
-                                        <!-- Total Backups Card -->
-                                        <div style="background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-top: 4px solid #6366f1;">
-                                            <div style="display: flex; align-items: center; gap: 12px;">
-                                                <div style="background: linear-gradient(135deg, #667eea, #764ba2); width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.5em; box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);">
-                                                    💾
-                                                </div>
-                                                <div>
-                                                    <div style="color: #64748b; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px;">Total Backups</div>
-                                                    <div style="color: #1e293b; font-size: 1.8em; font-weight: bold;">$($machineData.VBMMetadata.Storages.Count)</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        
-                                        <!-- Storage Used Card -->
-                                        <div style="background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-top: 4px solid #10b981;">
-                                            <div style="display: flex; align-items: center; gap: 12px;">
-                                                <div style="background: linear-gradient(135deg, #10b981, #059669); width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.5em; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);">
-                                                    📈
-                                                </div>
-                                                <div>
-                                                    <div style="color: #64748b; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px;">Storage Used</div>
-                                                    <div style="color: #1e293b; font-size: 1.8em; font-weight: bold;">$(Format-StorageSize ([math]::Round($totalBackupSize / 1GB, 2)))</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        
-                                        <!-- Retention Span Card -->
-                                        <div style="background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-top: 4px solid #f59e0b;">
-                                            <div style="display: flex; align-items: center; gap: 12px;">
-                                                <div style="background: linear-gradient(135deg, #f59e0b, #d97706); width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.5em; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.3);">
-                                                    📅
-                                                </div>
-                                                <div>
-                                                    <div style="color: #64748b; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px;">Retention Span</div>
-                                                    <div style="color: #1e293b; font-size: 1.8em; font-weight: bold;">$($comprehensiveAnalysis.RetentionDays) Days</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        
-                                        <!-- Dedup Efficiency Card -->
-                                        <div style="background: white; padding: 20px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); border-top: 4px solid #ec4899;">
-                                            <div style="display: flex; align-items: center; gap: 12px;">
-                                                <div style="background: linear-gradient(135deg, #ec4899, #be185d); width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; color: white; font-size: 1.5em; box-shadow: 0 4px 12px rgba(236, 72, 153, 0.3);">
-                                                    ⚡
-                                                </div>
-                                                <div>
-                                                    <div style="color: #64748b; font-size: 0.85em; text-transform: uppercase; letter-spacing: 0.5px;">Avg Dedup</div>
-                                                    <div style="color: #1e293b; font-size: 1.8em; font-weight: bold;">$avgDedupRatio%</div>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    
-                                    <!-- Three Column Cards Section -->
-                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(350px, 1fr)); gap: 20px; margin-top: 25px;">
-                                        
-                                        <!-- Backup Infrastructure Overview Card -->
-                                        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); overflow: hidden; transition: transform 0.3s ease;">
-                                            <div style="background: linear-gradient(135deg, #667eea, #764ba2); padding: 15px 20px;">
-                                                <h4 style="margin: 0; color: white; font-size: 1.1em; font-weight: 600; display: flex; align-items: center; gap: 8px;">
-                                                    <span style="background: rgba(255,255,255,0.2); padding: 6px; border-radius: 8px; display: inline-flex;">📊</span>
-                                                    Backup Infrastructure
-                                                </h4>
-                                            </div>
-                                            <div style="padding: 20px;">
-                                                <ul style="list-style: none; padding: 0; margin: 0;">
-                                                    <li style="padding: 10px 0; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center;">
-                                                        <span style="color: #10b981; font-size: 1.3em; margin-right: 12px;">✅</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Backup Schedule</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$($comprehensiveAnalysis.BackupFrequency) - $($comprehensiveAnalysis.TotalBackups) points</div>
-                                                        </div>
-                                                    </li>
-                                                    <li style="padding: 10px 0; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center;">
-                                                        <span style="color: $(if ($comprehensiveAnalysis.RetentionDays -ge 30) { '#10b981' } else { '#ef4444' }); font-size: 1.3em; margin-right: 12px;">$(if ($comprehensiveAnalysis.RetentionDays -ge 30) { '✅' } else { '❌' })</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Retention Window</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$($comprehensiveAnalysis.RetentionDays) days $(if ($comprehensiveAnalysis.RetentionDays -lt 30) { '<span style="color: #ef4444; font-size: 0.85em;">(Min: 30)</span>' } else { '<span style="color: #10b981; font-size: 0.85em;">(✓)</span>' })</div>
-                                                        </div>
-                                                    </li>
-                                                    <li style="padding: 10px 0; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center;">
-                                                        <span style="color: #10b981; font-size: 1.3em; margin-right: 12px;">✅</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Backup Types</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$($comprehensiveAnalysis.FullBackupCount) Full + $($comprehensiveAnalysis.IncrementalCount) Incremental</div>
-                                                        </div>
-                                                    </li>
-                                                    <li style="padding: 10px 0; display: flex; align-items: center;">
-                                                        <span style="color: #10b981; font-size: 1.3em; margin-right: 12px;">✅</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Storage Usage</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$(Format-StorageSize $comprehensiveAnalysis.TotalStorageUsed) <span style="color: #64748b; font-size: 0.9em;">(Avg: $(Format-StorageSize $comprehensiveAnalysis.AvgBackupSize))</span></div>
-                                                        </div>
-                                                    </li>
-                                                </ul>
-                                            </div>
-                                        </div>
-                                        
-                                        <!-- Storage Optimization Metrics Card -->
-                                        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); overflow: hidden; transition: transform 0.3s ease;">
-                                            <div style="background: linear-gradient(135deg, #10b981, #059669); padding: 15px 20px;">
-                                                <h4 style="margin: 0; color: white; font-size: 1.1em; font-weight: 600; display: flex; align-items: center; gap: 8px;">
-                                                    <span style="background: rgba(255,255,255,0.2); padding: 6px; border-radius: 8px; display: inline-flex;">⚡</span>
-                                                    Storage Optimization
-                                                </h4>
-                                            </div>
-                                            <div style="padding: 20px;">
-                                                <ul style="list-style: none; padding: 0; margin: 0;">
-                                                    <li style="padding: 10px 0; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center;">
-                                                        <span style="color: $(if ($comprehensiveAnalysis.ComplianceScore -ge 80) { '#10b981' } elseif ($comprehensiveAnalysis.ComplianceScore -ge 60) { '#f59e0b' } else { '#ef4444' }); font-size: 1.3em; margin-right: 12px;">$(if ($comprehensiveAnalysis.ComplianceScore -ge 80) { '✅' } elseif ($comprehensiveAnalysis.ComplianceScore -ge 60) { '⚠️' } else { '❌' })</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">GFS Compliance</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$($comprehensiveAnalysis.ComplianceScore)% <span style="color: $(if ($comprehensiveAnalysis.ComplianceScore -ge 80) { '#10b981' } elseif ($comprehensiveAnalysis.ComplianceScore -ge 60) { '#f59e0b' } else { '#ef4444' }); font-size: 0.85em;">$(if ($comprehensiveAnalysis.ComplianceScore -ge 80) { '(Excellent)' } elseif ($comprehensiveAnalysis.ComplianceScore -ge 60) { '(Good)' } else { '(Needs Work)' })</span></div>
-                                                        </div>
-                                                    </li>
-                                                    <li style="padding: 10px 0; border-bottom: 1px solid #f1f5f9; display: flex; align-items: center;">
-                                                        <span style="color: $(if ($comprehensiveAnalysis.DedupRatio -ge 50) { '#10b981' } else { '#ef4444' }); font-size: 1.3em; margin-right: 12px;">$(if ($comprehensiveAnalysis.DedupRatio -ge 50) { '✅' } else { '❌' })</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Deduplication</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$($comprehensiveAnalysis.DedupRatio)% <span style="color: $(if ($comprehensiveAnalysis.DedupRatio -ge 70) { '#10b981' } elseif ($comprehensiveAnalysis.DedupRatio -ge 50) { '#f59e0b' } else { '#ef4444' }); font-size: 0.85em;">$(if ($comprehensiveAnalysis.DedupRatio -ge 70) { '(Excellent)' } elseif ($comprehensiveAnalysis.DedupRatio -ge 50) { '(Good)' } else { '(Poor)' })</span></div>
-                                                        </div>
-                                                    </li>
-                                                    <li style="padding: 10px 0; display: flex; align-items: center;">
-                                                        <span style="color: $(if ($comprehensiveAnalysis.CompressionRatio -ge 30) { '#10b981' } else { '#f59e0b' }); font-size: 1.3em; margin-right: 12px;">$(if ($comprehensiveAnalysis.CompressionRatio -ge 30) { '✅' } else { '⚠️' })</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Compression</strong>
-                                                            <div style="color: #1e293b; font-size: 1.05em;">$($comprehensiveAnalysis.CompressionRatio)% <span style="color: $(if ($comprehensiveAnalysis.CompressionRatio -ge 40) { '#10b981' } elseif ($comprehensiveAnalysis.CompressionRatio -ge 30) { '#f59e0b' } else { '#ef4444' }); font-size: 0.85em;">$(if ($comprehensiveAnalysis.CompressionRatio -ge 40) { '(Excellent)' } elseif ($comprehensiveAnalysis.CompressionRatio -ge 30) { '(Good)' } else { '(Average)' })</span></div>
-                                                        </div>
-                                                    </li>
-                                                </ul>
-                                            </div>
-                                        </div>
-                                        
-                                        <!-- Risk Assessment & Status Card -->
-                                        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.08); overflow: hidden; transition: transform 0.3s ease;">
-                                            <div style="background: linear-gradient(135deg, #f59e0b, #d97706); padding: 15px 20px;">
-                                                <h4 style="margin: 0; color: white; font-size: 1.1em; font-weight: 600; display: flex; align-items: center; gap: 8px;">
-                                                    <span style="background: rgba(255,255,255,0.2); padding: 6px; border-radius: 8px; display: inline-flex;">🎯</span>
-                                                    Risk Assessment
-                                                </h4>
-                                            </div>
-                                            <div style="padding: 20px;">
-                                                <!-- Overall Risk Level -->
-                                                <div style="padding: 15px; background: $(if ($comprehensiveAnalysis.RiskLevel -eq 'Low') { '#f0fdf4' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'Medium') { '#fef3c7' } else { '#fee2e2' }); border-radius: 8px; margin-bottom: 15px; border-left: 4px solid $(if ($comprehensiveAnalysis.RiskLevel -eq 'Low') { '#10b981' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'Medium') { '#f59e0b' } else { '#ef4444' });">
-                                                    <div style="display: flex; align-items: center;">
-                                                        <span style="color: $(if ($comprehensiveAnalysis.RiskLevel -eq 'Low') { '#10b981' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'Medium') { '#f59e0b' } else { '#ef4444' }); font-size: 1.5em; margin-right: 12px;">$(if ($comprehensiveAnalysis.RiskLevel -eq 'Low') { '✅' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'Medium') { '⚠️' } else { '❌' })</span>
-                                                        <div>
-                                                            <strong style="color: #475569; font-size: 0.9em;">Overall Risk</strong>
-                                                            <div style="color: #1e293b; font-size: 1.2em; font-weight: 600;">$($comprehensiveAnalysis.RiskLevel)</div>
-                                                        </div>
-                                                    </div>
-                                                </div>
-"@
-                                    
-                                    # Add problems and benefits sections
-                                    if ($comprehensiveAnalysis.Problems.Count -gt 0) {
-                                        $html += @"
-                                                <!-- Issues Section -->
-                                                <div style="margin-bottom: 15px;">
-                                                    <h5 style="color: #dc2626; font-size: 0.95em; font-weight: 600; margin: 0 0 10px 0;">⚠️ Issues</h5>
-                                                    <ul style="list-style: none; padding: 0; margin: 0;">
-"@
-                                        foreach ($problem in $comprehensiveAnalysis.Problems | Select-Object -First 2) {
-                                            $html += @"
-                                                        <li style="padding: 6px 0; display: flex; align-items: center; font-size: 0.9em;">
-                                                            <span style="color: #ef4444; margin-right: 8px;">❌</span>
-                                                            <span style="color: #64748b;">$problem</span>
-                                                        </li>
-"@
-                                        }
-                                        $html += @"
-                                                    </ul>
-                                                </div>
-"@
-                                    }
-                                    
-                                    if ($comprehensiveAnalysis.Benefits.Count -gt 0) {
-                                        $html += @"
-                                                <!-- Strengths Section -->
-                                                <div>
-                                                    <h5 style="color: #059669; font-size: 0.95em; font-weight: 600; margin: 0 0 10px 0;">💪 Strengths</h5>
-                                                    <ul style="list-style: none; padding: 0; margin: 0;">
-"@
-                                        foreach ($benefit in $comprehensiveAnalysis.Benefits | Select-Object -First 2) {
-                                            $html += @"
-                                                        <li style="padding: 6px 0; display: flex; align-items: center; font-size: 0.9em;">
-                                                            <span style="color: #10b981; margin-right: 8px;">✅</span>
-                                                            <span style="color: #64748b;">$benefit</span>
-                                                        </li>
-"@
-                                        }
-                                        $html += @"
-                                                    </ul>
-                                                </div>
-"@
-                                    }
-                                    
-                                    $html += @"
-                                            </div>
-                                        </div>
-                                    </div>
+                            <div style="margin-top: 25px; padding: 20px; background: linear-gradient(135deg, #e0e7ff 0%, #eef2ff 100%); border-radius: 12px; border-left: 5px solid #6366f1; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);">
+                                <h4 style="margin: 0 0 15px 0; color: #312e81; font-size: 1.2em; display: flex; align-items: center; gap: 10px;">
+                                    📊 Executive Summary for $vmName
+                                    <span style="font-size: 0.7em; padding: 4px 12px; background: $(if ($comprehensiveAnalysis.RiskLevel -eq 'Critical') { 'linear-gradient(135deg, #dc2626, #b91c1c)' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'High') { 'linear-gradient(135deg, #f59e0b, #d97706)' } elseif ($comprehensiveAnalysis.RiskLevel -eq 'Medium') { 'linear-gradient(135deg, #3b82f6, #2563eb)' } else { 'linear-gradient(135deg, #10b981, #059669)' }); color: white; border-radius: 20px; margin-left: auto; font-weight: bold;">
+                                        Risk: $($comprehensiveAnalysis.RiskLevel)
+                                    </span>
+                                </h4>
+                                <div style="color: #1e293b; line-height: 1.6;">
+                                    $($comprehensiveAnalysis.MachineSummary -replace "`n", "<br>")
                                 </div>
                             </div>
 "@
@@ -4898,8 +4430,8 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (-not $skipGFS) {
                         # Add GFS compliance section only for non-ADHOC backups
                         $html += @"
-                            <div style="margin-top: 25px; padding: 25px; background: linear-gradient(135deg, #ede9fe 0%, #f3e8ff 100%); border-radius: 12px; border-left: 5px solid #7c3aed; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);">
-                                <h4 style="margin: 0 0 20px 0; color: #581c87; font-size: 1.3em; display: flex; align-items: center; gap: 10px;">
+                            <div style="margin-top: 25px; padding: 25px; background: linear-gradient(135deg, #fef3c7 0%, #fef9c3 100%); border-radius: 12px; border-left: 5px solid #f59e0b; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);">
+                                <h4 style="margin: 0 0 20px 0; color: #92400e; font-size: 1.3em; display: flex; align-items: center; gap: 10px;">
                                     🤖 AI-Powered Storage Intelligence & Deep Insights
                                     <span style="font-size: 0.6em; padding: 4px 12px; background: linear-gradient(135deg, #dc2626, #b91c1c); color: white; border-radius: 20px; margin-left: auto; font-weight: bold;">
                                         GFS Score: $($gfsAnalysis.GFSCompliance.Grade) ($($gfsAnalysis.GFSCompliance.Score)%)
@@ -4927,12 +4459,6 @@ document.addEventListener('DOMContentLoaded', function() {
                                                 <strong>Monthly:</strong> $($gfsAnalysis.GFSCompliance.MonthlyRetention.Actual)/$($gfsAnalysis.GFSCompliance.MonthlyRetention.Expected) months
                                                 <span style="float: right; color: $(if ($gfsAnalysis.GFSCompliance.MonthlyRetention.Coverage -ge 50) { '#059669' } else { '#dc2626' });">
                                                     $($gfsAnalysis.GFSCompliance.MonthlyRetention.Coverage)%
-                                                </span>
-                                            </div>
-                                            <div style="margin: 5px 0; padding: 5px; background: linear-gradient(90deg, #fef3c7, #fde68a); border-radius: 4px;">
-                                                <strong>Yearly:</strong> $($gfsAnalysis.GFSCompliance.YearlyRetention.Actual)/$($gfsAnalysis.GFSCompliance.YearlyRetention.Expected) years
-                                                <span style="float: right; color: $(if ($gfsAnalysis.GFSCompliance.YearlyRetention.Coverage -ge 40) { '#059669' } else { '#dc2626' });">
-                                                    $($gfsAnalysis.GFSCompliance.YearlyRetention.Coverage)%
                                                 </span>
                                             </div>
                                             <div style="margin-top: 10px; padding: 8px; background: linear-gradient(135deg, #6366f1, #4f46e5); color: white; border-radius: 6px; text-align: center; font-weight: bold;">
@@ -4971,160 +4497,12 @@ document.addEventListener('DOMContentLoaded', function() {
                                     </div>
                                 </div>
                                 
-                                <!-- GFS Storage Projection Section -->
-                                <div style="margin-top: 25px;">
-                                    <h5 style="margin: 0 0 20px 0; color: #581c87; font-size: 1.2em; font-weight: 600; display: flex; align-items: center; gap: 10px;">
-                                        📊 Projected Storage Requirements for Full GFS Compliance
-                                        <span style="font-size: 0.8em; color: #6b7280; font-weight: normal;">(Based on current backup patterns)</span>
-                                    </h5>
-"@
-                                    
-                                    # Calculate GFS projections
-                                    $avgFullSize = if ($machineData.FullBackups.Count -gt 0) {
-                                        ($machineData.FullBackups | Measure-Object -Property SizeGB -Average).Average
-                                    } else {
-                                        50  # Default estimate
-                                    }
-                                    
-                                    $avgIncrementalSize = if ($machineData.IncrementalBackups.Count -gt 0) {
-                                        ($machineData.IncrementalBackups | Measure-Object -Property SizeGB -Average).Average
-                                    } else {
-                                        5  # Default estimate
-                                    }
-                                    
-                                    # GFS Requirements (typical best practice)
-                                    $gfsRequirements = @{
-                                        Daily = @{
-                                            Count = 7
-                                            Type = "Incremental"
-                                            SizePerBackup = $avgIncrementalSize
-                                            TotalSize = 7 * $avgIncrementalSize
-                                            Icon = "📅"
-                                            Color = "#3b82f6"
-                                        }
-                                        Weekly = @{
-                                            Count = 4
-                                            Type = "Full"
-                                            SizePerBackup = $avgFullSize
-                                            TotalSize = 4 * $avgFullSize
-                                            Icon = "📆"
-                                            Color = "#10b981"
-                                        }
-                                        Monthly = @{
-                                            Count = 12
-                                            Type = "Full"
-                                            SizePerBackup = $avgFullSize
-                                            TotalSize = 12 * $avgFullSize
-                                            Icon = "🗓️"
-                                            Color = "#f59e0b"
-                                        }
-                                        Quarterly = @{
-                                            Count = 4
-                                            Type = "Full"
-                                            SizePerBackup = $avgFullSize
-                                            TotalSize = 4 * $avgFullSize
-                                            Icon = "📊"
-                                            Color = "#ec4899"
-                                        }
-                                        Yearly = @{
-                                            Count = 7
-                                            Type = "Full"
-                                            SizePerBackup = $avgFullSize
-                                            TotalSize = 7 * $avgFullSize
-                                            Icon = "📈"
-                                            Color = "#8b5cf6"
-                                        }
-                                    }
-                                    
-                                    $totalProjectedSize = 0
-                                    foreach ($tier in $gfsRequirements.Values) {
-                                        $totalProjectedSize += $tier.TotalSize
-                                    }
-                                    
-                                    # Add growth factor (20% yearly growth assumption)
-                                    $growthFactor = 1.2
-                                    $totalWithGrowth = $totalProjectedSize * $growthFactor
-                                    
-                                    $html += @"
-                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px; margin-bottom: 20px;">
-"@
-                                    
-                                    # Generate cards for each GFS tier
-                                    foreach ($tierName in @('Daily', 'Weekly', 'Monthly', 'Quarterly', 'Yearly')) {
-                                        $tier = $gfsRequirements[$tierName]
-                                        $html += @"
-                                        <!-- $tierName Projection Card -->
-                                        <div style="background: white; border-radius: 10px; padding: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); border-top: 3px solid $($tier.Color); position: relative; overflow: hidden;">
-                                            <div style="position: absolute; top: 10px; right: 10px; font-size: 2em; opacity: 0.1;">$($tier.Icon)</div>
-                                            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 12px;">
-                                                <span style="font-size: 1.5em;">$($tier.Icon)</span>
-                                                <h6 style="margin: 0; color: #1e293b; font-size: 1em; font-weight: 600;">$tierName</h6>
-                                            </div>
-                                            <div style="font-size: 0.85em; color: #64748b;">
-                                                <div style="margin-bottom: 8px; padding: 6px; background: #f8fafc; border-radius: 6px;">
-                                                    <strong style="color: #475569;">Backups:</strong> 
-                                                    <span style="float: right; color: $($tier.Color); font-weight: bold;">$($tier.Count)</span>
-                                                </div>
-                                                <div style="margin-bottom: 8px; padding: 6px; background: #f8fafc; border-radius: 6px;">
-                                                    <strong style="color: #475569;">Type:</strong> 
-                                                    <span style="float: right;">$($tier.Type)</span>
-                                                </div>
-                                                <div style="margin-bottom: 8px; padding: 6px; background: #f8fafc; border-radius: 6px;">
-                                                    <strong style="color: #475569;">Avg Size:</strong> 
-                                                    <span style="float: right;">$(Format-StorageSize $tier.SizePerBackup)</span>
-                                                </div>
-                                                <div style="padding: 8px; background: linear-gradient(135deg, $($tier.Color)15, $($tier.Color)08); border-radius: 6px; border: 1px solid $($tier.Color)30;">
-                                                    <strong style="color: $($tier.Color);">Total:</strong> 
-                                                    <span style="float: right; color: $($tier.Color); font-weight: bold; font-size: 1.1em;">$(Format-StorageSize $tier.TotalSize)</span>
-                                                </div>
-                                            </div>
-                                        </div>
-"@
-                                    }
-                                    
-                                    $html += @"
-                                    </div>
-                                    
-                                    <!-- Total Projection Summary -->
-                                    <div style="background: linear-gradient(135deg, #6366f1, #8b5cf6); padding: 20px; border-radius: 10px; color: white; margin-top: 20px;">
-                                        <h6 style="margin: 0 0 15px 0; font-size: 1.1em; font-weight: 600; display: flex; align-items: center; gap: 10px;">
-                                            💾 Total Storage Projection Summary
-                                        </h6>
-                                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
-                                            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px;">
-                                                <div style="font-size: 0.9em; opacity: 0.9;">Current Usage</div>
-                                                <div style="font-size: 1.8em; font-weight: bold;">$(Format-StorageSize $comprehensiveAnalysis.TotalStorageUsed)</div>
-                                            </div>
-                                            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px;">
-                                                <div style="font-size: 0.9em; opacity: 0.9;">Full GFS Required</div>
-                                                <div style="font-size: 1.8em; font-weight: bold;">$(Format-StorageSize $totalProjectedSize)</div>
-                                            </div>
-                                            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px;">
-                                                <div style="font-size: 0.9em; opacity: 0.9;">With 20% Growth</div>
-                                                <div style="font-size: 1.8em; font-weight: bold;">$(Format-StorageSize $totalWithGrowth)</div>
-                                            </div>
-                                            <div style="background: rgba(255,255,255,0.1); padding: 15px; border-radius: 8px;">
-                                                <div style="font-size: 0.9em; opacity: 0.9;">Additional Space Needed</div>
-                                                <div style="font-size: 1.8em; font-weight: bold; color: #fbbf24;">$(Format-StorageSize ([Math]::Max(0, $totalWithGrowth - $comprehensiveAnalysis.TotalStorageUsed)))</div>
-                                            </div>
-                                        </div>
-                                        <div style="margin-top: 15px; padding: 10px; background: rgba(255,255,255,0.1); border-radius: 6px; font-size: 0.9em;">
-                                            <strong>📌 Note:</strong> This projection assumes full GFS compliance with 7 daily, 4 weekly, 12 monthly, 4 quarterly, and 7 yearly retention points, plus 20% growth buffer for the year.
-                                        </div>
-                                    </div>
-                                </div>
-"@
-                                    
-                                    $html += @"
-                                
-                                <!-- Detailed Insights Cards -->
-                                <div style="margin-top: 30px;">
-                                    <h5 style="margin: 0 0 20px 0; color: #581c87; font-size: 1.2em; font-weight: 600;">🔍 Detailed Analysis & Observations</h5>
-                                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px;">
+                                <!-- Detailed Insights -->
+                                <div style="margin-top: 20px;">
+                                    <h5 style="margin: 0 0 15px 0; color: #1e293b; font-size: 1.1em;">🔍 Detailed Analysis & Observations</h5>
 "@
                     
-                    $insightCount = 0
-                    foreach ($insight in $gfsAnalysis.Insights | Select-Object -First 6) {
+                    foreach ($insight in $gfsAnalysis.Insights) {
                         $insightIcon = switch ($insight.Severity) {
                             "Critical" { "❌" }
                             "Warning" { "⚠️" }
@@ -5139,142 +4517,85 @@ document.addEventListener('DOMContentLoaded', function() {
                             default { "#6b7280" }
                         }
                         
-                        $cardGradient = switch ($insight.Severity) {
-                            "Critical" { "linear-gradient(135deg, #fee2e2, #fecaca)" }
-                            "Warning" { "linear-gradient(135deg, #fef3c7, #fed7aa)" }
-                            "Info" { "linear-gradient(135deg, #dbeafe, #bfdbfe)" }
-                            default { "linear-gradient(135deg, #f3f4f6, #e5e7eb)" }
-                        }
-                        
                         $html += @"
-                                        <div style="background: white; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.08); overflow: hidden; transition: transform 0.2s;">
-                                            <div style="background: $cardGradient; padding: 15px; border-bottom: 2px solid $insightColor;">
-                                                <div style="font-weight: 600; color: $insightColor; font-size: 1.05em; display: flex; align-items: center; gap: 8px;">
-                                                    <span style="font-size: 1.3em;">$insightIcon</span>
-                                                    $($insight.Category)
-                                                </div>
-                                            </div>
-                                            <div style="padding: 15px;">
-                                                <div style="color: #1e293b; font-size: 0.95em; margin-bottom: 8px; font-weight: 500;">
-                                                    $($insight.Message)
-                                                </div>
-                                                <div style="color: #64748b; font-size: 0.85em; line-height: 1.6;">
-                                                    $($insight.Detail)
-                                                </div>
-                                            </div>
+                                    <div style="margin: 10px 0; padding: 12px; background: white; border-left: 4px solid $insightColor; border-radius: 6px;">
+                                        <div style="font-weight: bold; color: $insightColor; margin-bottom: 5px;">
+                                            $insightIcon $($insight.Category)
                                         </div>
-"@
-                        $insightCount++
-                    }
-                    
-                    # Fill remaining slots with placeholder if less than 3 insights
-                    while ($insightCount -lt 3) {
-                        $html += @"
-                                        <div style="background: linear-gradient(135deg, #f8fafc, #f1f5f9); border-radius: 12px; padding: 20px; border: 2px dashed #cbd5e1; opacity: 0.5;">
-                                            <div style="text-align: center; color: #94a3b8;">
-                                                <span style="font-size: 2em;">📊</span>
-                                                <div style="margin-top: 10px; font-size: 0.9em;">No additional insights</div>
-                                            </div>
+                                        <div style="color: #1e293b; font-size: 0.95em; margin-bottom: 5px;">
+                                            $($insight.Message)
                                         </div>
-"@
-                        $insightCount++
-                    }
-                    
-                    $html += @"
+                                        <div style="color: #6b7280; font-size: 0.85em; line-height: 1.5;">
+                                            $($insight.Detail)
+                                        </div>
                                     </div>
 "@
+                    }
                     
-                    # Add verbose recommendations in card layout with light green background
+                    # Add verbose recommendations
                     $verboseRecs = Get-VerboseStorageRecommendations -GFSAnalysis $gfsAnalysis -MachineData $machineData -StorageMetrics $null
                     
-                    if ($verboseRecs.Count -gt 0 -and $verboseRecs[0]) {
-                        $rec = $verboseRecs[0]  # Get first recommendation
-                        
-                        $recIcon = switch ($rec.Severity) {
-                            "Critical" { "🔴" }
-                            "High" { "🟠" }
-                            "Medium" { "🟡" }
-                            default { "🟢" }
-                        }
-                        
+                    if ($verboseRecs.Count -gt 0) {
                         $html += @"
                                 </div>
                                 
                                 <!-- Actionable Recommendations -->
-                                <div style="margin-top: 30px; padding: 25px; background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px;">
-                                    <h4 style="margin: 0 0 20px 0; color: #166534; font-size: 1.3em; text-align: center;">
-                                        🎯 Actionable Recommendations
-                                    </h4>
-                                    
-                                    <!-- Recommendation Header -->
-                                    <div style="background: rgba(255, 255, 255, 0.8); border-radius: 10px; padding: 15px; margin-bottom: 20px; border-left: 4px solid $(switch ($rec.Severity) { 'Critical' { '#ef4444' } 'High' { '#f97316' } 'Medium' { '#f59e0b' } default { '#22c55e' } });">
-                                        <div style="font-weight: bold; color: #1f2937; font-size: 1.1em; margin-bottom: 8px; display: flex; align-items: center;">
-                                            <span style="font-size: 1.5em; margin-right: 10px;">$recIcon</span>
-                                            <span>$($rec.Title)</span>
+                                <div style="margin-top: 20px; padding-top: 20px; border-top: 2px solid #e5e7eb;">
+                                    <h5 style="margin: 0 0 15px 0; color: #dc2626; font-size: 1.1em;">🎯 Actionable Recommendations</h5>
+"@
+                        
+                        foreach ($rec in $verboseRecs) {
+                            $recIcon = switch ($rec.Severity) {
+                                "Critical" { "🔴" }
+                                "High" { "🟠" }
+                                "Medium" { "🟡" }
+                                default { "🟢" }
+                            }
+                            
+                            $html += @"
+                                    <div style="margin: 15px 0; padding: 15px; background: linear-gradient(135deg, #fee2e2, #fef2f2); border-radius: 8px; border: 1px solid #fca5a5;">
+                                        <div style="font-weight: bold; color: #991b1b; font-size: 1.05em; margin-bottom: 8px;">
+                                            $recIcon $($rec.Title)
                                         </div>
-                                        <div style="color: #4b5563;">
+                                        <div style="color: #dc2626; margin-bottom: 10px;">
                                             $($rec.Message)
                                         </div>
-                                    </div>
-                                    
-                                    <!-- Two Cards Section -->
-                                    <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px;">
-                                        <!-- Key Points Card -->
-                                        <div style="background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);">
-                                            <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                                                <span style="font-size: 1.5em; margin-right: 10px;">📌</span>
-                                                <h5 style="margin: 0; color: #14532d; font-size: 1.1em;">Key Points</h5>
-                                            </div>
 "@
-                        
-                        if ($rec.Details -and $rec.Details.Count -gt 0) {
-                            $html += @"
-                                            <ul style="margin: 0; padding-left: 20px; color: #166534; line-height: 1.8;">
+                            
+                            if ($rec.Details) {
+                                $html += @"
+                                        <div style="margin: 10px 0; padding: 10px; background: white; border-radius: 4px;">
+                                            <strong style="color: #7c2d12;">Details:</strong>
+                                            <ul style="margin: 5px 0 0 20px; color: #92400e;">
 "@
-                            foreach ($detail in $rec.Details) {
-                                $html += "                                                <li style='margin: 8px 0;'>$detail</li>`n"
-                            }
-                            $html += @"
+                                foreach ($detail in $rec.Details) {
+                                    $html += "                                                <li>$detail</li>`n"
+                                }
+                                $html += @"
                                             </ul>
-"@
-                        } else {
-                            $html += @"
-                                            <p style="color: #166534; margin: 0;">No additional details available for this recommendation.</p>
-"@
-                        }
-                        
-                        $html += @"
                                         </div>
-                                        
-                                        <!-- Quick Actions Card -->
-                                        <div style="background: white; border-radius: 10px; padding: 20px; box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);">
-                                            <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                                                <span style="font-size: 1.5em; margin-right: 10px;">⚡</span>
-                                                <h5 style="margin: 0; color: #14532d; font-size: 1.1em;">Quick Actions</h5>
-                                            </div>
 "@
-                        
-                        if ($rec.Actions -and $rec.Actions.Count -gt 0) {
-                            $html += @"
-                                            <ol style="margin: 0; padding-left: 20px; color: #166534; line-height: 1.8;">
-"@
-                            foreach ($action in $rec.Actions) {
-                                $html += "                                                <li style='margin: 8px 0;'>$action</li>`n"
                             }
-                            $html += @"
-                                            </ol>
+                            
+                            if ($rec.Actions) {
+                                $html += @"
+                                        <div style="margin-top: 10px; padding: 10px; background: linear-gradient(135deg, #dcfce7, #f0fdf4); border-radius: 4px;">
+                                            <strong style="color: #14532d;">Recommended Actions:</strong>
+                                            <ol style="margin: 5px 0 0 20px; color: #166534;">
 "@
-                        } else {
+                                foreach ($action in $rec.Actions) {
+                                    $html += "                                                <li>$action</li>`n"
+                                }
+                                $html += @"
+                                            </ol>
+                                        </div>
+"@
+                            }
+                            
                             $html += @"
-                                            <p style="color: #166534; margin: 0;">Review the key points above and implement appropriate backup strategy improvements.</p>
+                                    </div>
 "@
                         }
-                        
-                        $html += @"
-                                        </div>
-                                    </div>
-                                </div>
-"@
                     }
                     
                     $html += @"
@@ -5301,164 +4622,46 @@ document.addEventListener('DOMContentLoaded', function() {
 "@
                     }
                     
-                    # Add best practice recommendations section in card layout (always show 3 cards)
-                    if ($comprehensiveAnalysis.BestPracticeRecommendations.Count -gt 0 -or $comprehensiveAnalysis.VeeamSpecificRecommendations.Count -gt 0 -or $machineRecommendations.Count -gt 0) {
+                    # Add best practice recommendations section
+                    if ($comprehensiveAnalysis.BestPracticeRecommendations.Count -gt 0 -or $comprehensiveAnalysis.VeeamSpecificRecommendations.Count -gt 0) {
                         $html += @"
-                            <div style="margin-top: 30px;">
-                                <h4 style="margin: 0 0 20px 0; color: #075985; font-size: 1.3em; text-align: center;">
-                                    📚 Best Practices & Recommendations
+                            <div style="margin-top: 25px; padding: 25px; background: linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%); border-radius: 12px; border-left: 5px solid #0284c7; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.07);">
+                                <h4 style="margin: 0 0 20px 0; color: #075985; font-size: 1.3em;">
+                                    🎯 Best Practices & Recommendations
                                 </h4>
-                                <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px;">
 "@
                         
-                        # Global Backup Best Practices Card (Always show)
-                        $html += @"
-                                    <div style="background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border-left: 4px solid #0284c7;">
-                                        <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                                            <span style="font-size: 2em; margin-right: 10px;">🌐</span>
-                                            <h5 style="margin: 0; color: #0c4a6e; font-size: 1.1em;">Global Backup Best Practices</h5>
-                                        </div>
-                                        <div style="background: rgba(255, 255, 255, 0.7); border-radius: 8px; padding: 15px;">
-                                            <ul style="margin: 0; padding-left: 20px; color: #164e63; line-height: 1.5; font-size: 0.9em;">
-"@
-                        if ($comprehensiveAnalysis.BestPracticeRecommendations.Count -gt 0) {
-                            $count = 0
-                            foreach ($rec in $comprehensiveAnalysis.BestPracticeRecommendations) {
-                                if ($count -ge 5) { break }  # Limit to 5 items for card size
-                                $html += "                                                <li style='margin: 6px 0;'>$rec</li>`n"
-                                $count++
-                            }
-                        } else {
-                            # Default recommendations if none exist
-                            $html += @"
-                                                <li style='margin: 6px 0;'>Follow 3-2-1 backup rule</li>
-                                                <li style='margin: 6px 0;'>Test restore procedures regularly</li>
-                                                <li style='margin: 6px 0;'>Encrypt sensitive backups</li>
-                                                <li style='margin: 6px 0;'>Monitor backup job success rates</li>
-                                                <li style='margin: 6px 0;'>Document recovery procedures</li>
-"@
-                        }
-                        $html += @"
-                                            </ul>
-                                        </div>
-                                        <div style="margin-top: 15px; padding: 10px; background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); border-radius: 6px;">
-                                            <strong style="color: #1e3a8a; font-size: 0.85em;">💡 Key Focus:</strong>
-                                            <span style="color: #1e40af; font-size: 0.8em;">Follow 3-2-1 rule, test restores regularly</span>
-                                        </div>
-                                    </div>
-"@
-                        
-                        # Additional Resources or Veeam-Specific Card (Always show)
                         if ($comprehensiveAnalysis.VeeamSpecificRecommendations.Count -gt 0) {
-                            # Show Veeam-Specific if available
                             $html += @"
-                                    <div style="background: linear-gradient(135deg, #dcfce7 0%, #bbf7d0 100%); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border-left: 4px solid #16a34a;">
-                                        <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                                            <span style="font-size: 2em; margin-right: 10px;">🔧</span>
-                                            <h5 style="margin: 0; color: #14532d; font-size: 1.1em;">Veeam-Specific Optimizations</h5>
-                                        </div>
-                                        <div style="background: rgba(255, 255, 255, 0.7); border-radius: 8px; padding: 15px;">
-                                            <ul style="margin: 0; padding-left: 20px; color: #166534; line-height: 1.5; font-size: 0.9em;">
+                                <div style="margin-bottom: 20px;">
+                                    <h5 style="color: #0c4a6e; margin: 0 0 10px 0;">🔧 Veeam-Specific Optimizations</h5>
+                                    <ul style="margin: 0; padding-left: 20px; color: #164e63;">
 "@
-                            $count = 0
                             foreach ($rec in $comprehensiveAnalysis.VeeamSpecificRecommendations) {
-                                if ($count -ge 5) { break }  # Limit to 5 items for card size
-                                $html += "                                                <li style='margin: 6px 0;'>$rec</li>`n"
-                                $count++
+                                $html += "                                        <li style='margin: 5px 0;'>$rec</li>`n"
                             }
                             $html += @"
-                                            </ul>
-                                        </div>
-                                        <div style="margin-top: 15px; padding: 10px; background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%); border-radius: 6px;">
-                                            <strong style="color: #064e3b; font-size: 0.85em;">⚡ Performance Tip:</strong>
-                                            <span style="color: #047857; font-size: 0.8em;">Enable deduplication, optimize job chains</span>
-                                        </div>
-                                    </div>
-"@
-                        } else {
-                            # Show Additional Resources as fallback
-                            $html += @"
-                                    <div style="background: linear-gradient(135deg, #e0f2fe 0%, #bae6fd 100%); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border-left: 4px solid #0284c7;">
-                                        <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                                            <span style="font-size: 2em; margin-right: 10px;">📊</span>
-                                            <h5 style="margin: 0; color: #0c4a6e; font-size: 1.1em;">Additional Resources</h5>
-                                        </div>
-                                        <div style="background: rgba(255, 255, 255, 0.7); border-radius: 8px; padding: 15px;">
-                                            <p style="margin: 0 0 10px 0; color: #164e63; font-size: 0.9em;">Enhance your backup strategy with:</p>
-                                            <ul style="margin: 0; padding-left: 20px; color: #164e63; line-height: 1.5; font-size: 0.9em;">
-                                                <li style='margin: 6px 0;'>Regular backup validation tests</li>
-                                                <li style='margin: 6px 0;'>Automated monitoring and alerting</li>
-                                                <li style='margin: 6px 0;'>Documented recovery procedures</li>
-                                                <li style='margin: 6px 0;'>Periodic strategy reviews</li>
-                                            </ul>
-                                        </div>
-                                        <div style="margin-top: 15px; padding: 10px; background: linear-gradient(135deg, #dbeafe 0%, #bfdbfe 100%); border-radius: 6px;">
-                                            <strong style="color: #1e3a8a; font-size: 0.85em;">🎯 Goal:</strong>
-                                            <span style="color: #1e40af; font-size: 0.8em;">Achieve RTO/RPO targets reliably</span>
-                                        </div>
-                                    </div>
-"@
-                        }
-                        
-                        # Storage Insights Card (Always show as third card)
-                        $storageIcon = "💡"
-                        $storageSeverity = "LOW"
-                        $storageMessage = "Storage Analysis"
-                        
-                        # Determine storage severity based on metrics
-                        if ($machineData.TotalSizeGB -gt 500) {
-                            $storageSeverity = "LOW"
-                            $storageMessage = "Large storage consumer ($(Format-StorageSize ($machineData.TotalSizeGB * 1GB)) avg) - monitor for optimization opportunities"
-                        } elseif ($machineData.FullBackups.Count -gt 0 -and $machineData.IncrementalBackups.Count -eq 0) {
-                            $storageSeverity = "LOW"
-                            $potentialSavings = Format-StorageSize ($machineData.TotalSizeGB * 0.3 * 1GB)
-                            $storageMessage = "High full backup ratio (100%) - could reduce storage by ~$potentialSavings with incrementals"
-                        } else {
-                            $storageMessage = "Storage usage is within normal parameters"
-                        }
-                        
-                        $html += @"
-                                    <div style="background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%); border-radius: 12px; padding: 20px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); border-left: 4px solid #f59e0b;">
-                                        <div style="display: flex; align-items: center; margin-bottom: 15px;">
-                                            <span style="font-size: 2em; margin-right: 10px;">💡</span>
-                                            <h5 style="margin: 0; color: #78350f; font-size: 1.1em;">Storage Insights & Recommendations</h5>
-                                        </div>
-                                        <div style="background: rgba(255, 255, 255, 0.7); border-radius: 8px; padding: 15px;">
-                                            <div style="margin-bottom: 10px;">
-                                                <div style="display: flex; align-items: center; margin-bottom: 8px;">
-                                                    <span style="font-size: 1.2em; margin-right: 8px;">🔍</span>
-                                                    <strong style="color: #92400e; font-size: 0.95em;">Storage Analysis</strong>
-                                                    <span style="margin-left: auto; padding: 2px 8px; background: #3b82f6; color: white; border-radius: 10px; font-size: 0.75em;">$storageSeverity</span>
-                                                </div>
-                                                <p style="margin: 0; color: #92400e; font-size: 0.85em;">$storageMessage</p>
-                                            </div>
-"@
-                        
-                        # Add storage metrics if available
-                        if ($gfsAnalysis -and $gfsAnalysis.StorageEfficiency) {
-                            $dedupColor = if ($gfsAnalysis.StorageEfficiency.AverageDedupRatio -ge 50) { "#059669" } else { "#dc2626" }
-                            $html += @"
-                                            <div style="margin-top: 10px; padding-top: 10px; border-top: 1px solid #fed7aa;">
-                                                <div style="font-size: 0.85em; color: #92400e;">
-                                                    <div style="margin: 4px 0;">📊 Dedup Ratio: <span style="float: right; color: $dedupColor; font-weight: bold;">$($gfsAnalysis.StorageEfficiency.AverageDedupRatio)%</span></div>
-                                                    <div style="margin: 4px 0;">💾 Space Saved: <span style="float: right; color: #059669; font-weight: bold;">$(Format-StorageSize ([math]::Round($gfsAnalysis.StorageEfficiency.SpaceSaved / 1GB, 2)))</span></div>
-                                                    <div style="margin: 4px 0;">📈 Compression: <span style="float: right;">$($gfsAnalysis.StorageEfficiency.CompressionRatio)%</span></div>
-                                                </div>
-                                            </div>
-"@
-                        }
-                        
-                        $html += @"
-                                        </div>
-                                        <div style="margin-top: 15px; padding: 10px; background: linear-gradient(135deg, #fed7aa 0%, #fdba74 100%); border-radius: 6px;">
-                                            <strong style="color: #7c2d12; font-size: 0.85em;">🎯 Goal:</strong>
-                                            <span style="color: #9a3412; font-size: 0.8em;">Achieve RTO/RPO targets with reliable, efficient backups</span>
-                                        </div>
-                                    </div>
-"@
-                        
-                        $html += @"
+                                    </ul>
                                 </div>
+"@
+                        }
+                        
+                        if ($comprehensiveAnalysis.BestPracticeRecommendations.Count -gt 0) {
+                            $html += @"
+                                <div>
+                                    <h5 style="color: #0c4a6e; margin: 0 0 10px 0;">📋 Global Backup Best Practices</h5>
+                                    <ul style="margin: 0; padding-left: 20px; color: #164e63;">
+"@
+                            foreach ($rec in $comprehensiveAnalysis.BestPracticeRecommendations | Select-Object -First 5) {
+                                $html += "                                        <li style='margin: 5px 0;'>$rec</li>`n"
+                            }
+                            $html += @"
+                                    </ul>
+                                </div>
+"@
+                        }
+                        
+                        $html += @"
                             </div>
 "@
                     }
@@ -5753,7 +4956,6 @@ document.addEventListener('DOMContentLoaded', function() {
         
         <div class="footer">
             <p>Generated on $(Get-Date -Format "MMMM dd, yyyy 'at' HH:mm:ss")</p>
-            <p style="margin-top: 10px; font-size: 12px; color: #666;">David Andrews Copyright 2025 - All Rights Reserved</p>
         </div>
     </div>
     
@@ -6329,21 +5531,28 @@ function New-ProfessionalEmailBody {
         $_.FullBackups.Count + $_.IncrementalBackups.Count + $_.ReverseIncrementalBackups.Count 
     } | Measure-Object -Sum).Sum
     
-    # Calculate average retention points (not days)
-    $retentionPointCounts = $BackupInventory.Values | ForEach-Object { 
-        # Count total backup files as retention points
-        $points = 0
-        if ($_.FullBackups -and $_.FullBackups.Count) { $points += $_.FullBackups.Count }
-        if ($_.IncrementalBackups -and $_.IncrementalBackups.Count) { $points += $_.IncrementalBackups.Count }
-        if ($_.ReverseIncrementalBackups -and $_.ReverseIncrementalBackups.Count) { $points += $_.ReverseIncrementalBackups.Count }
-        if ($_.RetentionPoints -gt 0) { $points = $_.RetentionPoints }  # Use explicit count if available
-        $points
+    # Calculate average retention and backup frequency
+    $retentionValues = $BackupInventory.Values | ForEach-Object { 
+        if ($_.RetentionDays -gt 0) {
+            $_.RetentionDays
+        } elseif ($_.OldestBackup -and $_.NewestBackup) {
+            try {
+                # Try to calculate from dates if RetentionDays not set
+                $oldest = if ($_.OldestBackup -is [DateTime]) { $_.OldestBackup } else { [DateTime]::Parse($_.OldestBackup) }
+                $newest = if ($_.NewestBackup -is [DateTime]) { $_.NewestBackup } else { [DateTime]::Parse($_.NewestBackup) }
+                ($newest - $oldest).Days
+            } catch {
+                0
+            }
+        } else { 
+            0 
+        }
     } | Where-Object { $_ -gt 0 }
     
-    $avgRetention = if ($retentionPointCounts.Count -gt 0) {
-        [math]::Round(($retentionPointCounts | Measure-Object -Average).Average, 0)
+    $avgRetention = if ($retentionValues.Count -gt 0) {
+        [math]::Round(($retentionValues | Measure-Object -Average).Average, 0)
     } else {
-        7  # Default to 7 retention points if no data available
+        7  # Default to 7 days if no retention data available
     }
     
     # Generate AI summary if connected (with lower temperature for consistency)
@@ -6359,7 +5568,7 @@ function New-ProfessionalEmailBody {
             $context = "Analyze this Veeam backup infrastructure report for ${ServerName}. "
             $context += "Infrastructure overview: $totalRepositories backup repositories managing $totalMachines protected virtual machines. "
             $context += "Storage metrics: $totalBackupFiles backup files consuming $totalBackupSize TB of storage. "
-            $context += "Average retention is $avgRetention restore points per VM. "
+            $context += "Average retention period is $avgRetention days. "
             
             # Add storage growth metrics
             if ($StorageMetrics.UsagePercent) {
@@ -6369,18 +5578,27 @@ function New-ProfessionalEmailBody {
                 }
             }
             
-            # Request detailed executive summary (3 paragraphs including repository analysis)
-            $repoContext = ""
-            foreach ($repo in $repositoryDetails.Keys | Select-Object -First 3) {
-                $repoContext += "$repo repository contains $($repositoryDetails[$repo].Machines.Count) machines with $($repositoryDetails[$repo].FileCount) backup files totaling $([math]::Round($repositoryDetails[$repo].TotalSize, 1))GB. "
-            }
-            
-            $summaryPrompt = "$context $repoContext Write exactly 3 detailed paragraphs for an executive summary. First paragraph should analyze the current backup infrastructure state, coverage, and health. Second paragraph should discuss the repository architecture, distribution strategy, and workload balance. Third paragraph should address trends, risks, strategic considerations, and optimization opportunities. Be specific with numbers and percentages. Use plain text only without any markdown formatting, asterisks, or special characters."
-            $aiSummary = Invoke-OpenAICompletion -Prompt $summaryPrompt -MaxTokens 500 -Temperature 0.3
+            # Request detailed executive summary (2 paragraphs)
+            $summaryPrompt = "$context Write exactly 2 detailed paragraphs for an executive summary. First paragraph should analyze the current backup infrastructure state, coverage, and health. Second paragraph should discuss trends, risks, and strategic considerations. Be specific with numbers and percentages. Use plain text only without any markdown formatting, asterisks, or special characters."
+            $aiSummary = Invoke-OpenAICompletion -Prompt $summaryPrompt -MaxTokens 350 -Temperature 0.3
             
             # Clean any remaining formatting from AI response
             if ($aiSummary) {
                 $aiSummary = $aiSummary -replace '\*\*', '' -replace '\*', '' -replace '\\', '' -replace '►', '' -replace '\#{1,6}\s*', ''
+            }
+            
+            # Request repository-level analysis (2 paragraphs)
+            $repoContext = "Repository details: "
+            foreach ($repo in $repositoryDetails.Keys | Select-Object -First 3) {
+                $repoContext += "$repo repository contains $($repositoryDetails[$repo].Machines.Count) machines with $($repositoryDetails[$repo].FileCount) backup files totaling $([math]::Round($repositoryDetails[$repo].TotalSize, 1))GB. "
+            }
+            
+            $repoPrompt = "$context $repoContext Write exactly 2 detailed paragraphs analyzing the repository architecture. First paragraph should describe repository distribution, workload balance, and backup patterns. Second paragraph should provide specific repository-level optimization recommendations. Use plain text only without any markdown formatting, asterisks, or special characters."
+            $aiRepositoryAnalysis = Invoke-OpenAICompletion -Prompt $repoPrompt -MaxTokens 350 -Temperature 0.3
+            
+            # Clean any remaining formatting from AI response
+            if ($aiRepositoryAnalysis) {
+                $aiRepositoryAnalysis = $aiRepositoryAnalysis -replace '\*\*', '' -replace '\*', '' -replace '\\', '' -replace '►', '' -replace '\#{1,6}\s*', ''
             }
             
             # Request server-level recommendations
@@ -6406,14 +5624,18 @@ function New-ProfessionalEmailBody {
         }
     }
     
-    # Enhanced fallback summaries if AI not available (3 paragraphs)
+    # Enhanced fallback summaries if AI not available
     if (-not $aiSummary) {
+        $aiSummary = "The Veeam backup infrastructure analysis for $ServerName reveals a comprehensive data protection environment spanning $totalRepositories distinct backup repositories. These repositories collectively safeguard $totalMachines virtual machines through a robust backup strategy that has generated $totalBackupFiles backup files, consuming approximately $totalBackupSize TB of storage capacity. The infrastructure demonstrates a mature backup ecosystem with an average retention period of $avgRetention days, indicating compliance with standard data protection policies and regulatory requirements.`n`nFrom an operational perspective, the current storage utilization and backup growth patterns suggest the infrastructure is functioning within acceptable parameters. The diversity of backup types across repositories indicates a well-structured approach to data protection, balancing full backups for complete recovery points with incremental backups for storage efficiency. This architecture provides multiple recovery options while optimizing storage consumption, though continuous monitoring of growth trends and periodic optimization reviews are recommended to maintain peak efficiency."
+    }
+    
+    if (-not $aiRepositoryAnalysis) {
         $repoNames = $repositoryDetails.Keys | Select-Object -First 3
         $repoText = if ($repoNames.Count -gt 0) {
             "Primary repositories include: " + ($repoNames -join ", ") + ". "
         } else { "" }
         
-        $aiSummary = "The Veeam backup infrastructure analysis for $ServerName reveals a comprehensive data protection environment spanning $totalRepositories distinct backup repositories. These repositories collectively safeguard $totalMachines virtual machines through a robust backup strategy that has generated $totalBackupFiles backup files, consuming approximately $totalBackupSize TB of storage capacity. The infrastructure demonstrates a mature backup ecosystem with an average retention of $avgRetention points, indicating compliance with standard data protection policies and regulatory requirements.`n`nThe repository architecture demonstrates a distributed backup strategy across $totalRepositories distinct storage locations, providing both redundancy and workload distribution. ${repoText}Each repository maintains its own backup chains and retention policies, allowing for granular control over data protection strategies. The distribution of $totalMachines machines across these repositories helps prevent single points of failure and enables parallel backup operations, improving overall backup window efficiency and reducing the impact on production systems during backup operations.`n`nFrom an operational perspective, the current storage utilization and backup growth patterns suggest the infrastructure is functioning within acceptable parameters. The diversity of backup types across repositories indicates a well-structured approach to data protection, balancing full backups for complete recovery points with incremental backups for storage efficiency. Several optimization opportunities exist to enhance performance and reliability, including repository load balancing, regular backup chain health checks, and automated monitoring for capacity thresholds. Continuous monitoring of growth trends and periodic optimization reviews are recommended to maintain peak efficiency."
+        $aiRepositoryAnalysis = "The repository architecture demonstrates a distributed backup strategy across $totalRepositories distinct storage locations, providing both redundancy and workload distribution. ${repoText}Each repository maintains its own backup chains and retention policies, allowing for granular control over data protection strategies. The distribution of $totalMachines machines across these repositories helps prevent single points of failure and enables parallel backup operations, improving overall backup window efficiency and reducing the impact on production systems during backup operations.`n`nAt the server level, several optimization opportunities exist to enhance the backup infrastructure's performance and reliability. Consider implementing repository load balancing to ensure even distribution of backup workloads, preventing any single repository from becoming a bottleneck. Additionally, regular backup chain health checks and periodic synthetic full backup operations can help maintain optimal repository performance. Implementing automated monitoring for repository capacity thresholds and backup job success rates will provide proactive alerts for potential issues before they impact recovery capabilities."
     }
     
     if ($aiRecommendations.Count -eq 0) {
@@ -6483,6 +5705,24 @@ function New-ProfessionalEmailBody {
             margin-bottom: 20px;
         }
         .summary-section p {
+            margin-bottom: 15px;
+            text-align: justify;
+            line-height: 1.8;
+        }
+        .repository-section {
+            background: #fff9e6;
+            border-left: 4px solid #ffa500;
+            padding: 25px;
+            margin: 30px 0;
+            border-radius: 5px;
+        }
+        .repository-section h2 {
+            color: #ff8c00;
+            margin-top: 0;
+            font-size: 24px;
+            margin-bottom: 20px;
+        }
+        .repository-section p {
             margin-bottom: 15px;
             text-align: justify;
             line-height: 1.8;
@@ -6610,6 +5850,15 @@ $(foreach ($paragraph in $aiSummary -split "`n") {
 })
             </div>
             
+            <div class="repository-section">
+                <h2>Repository Architecture Analysis</h2>
+$(foreach ($paragraph in $aiRepositoryAnalysis -split "`n") {
+    if ($paragraph.Trim()) {
+"                <p>$paragraph</p>`n"
+    }
+})
+            </div>
+            
             <div class="stats-grid">
                 <div class="stat-card">
                     <div class="stat-value">$totalRepositories</div>
@@ -6660,9 +5909,6 @@ $(foreach ($recommendation in $aiRecommendations) {
                 Cell +1 (713) 480-9933
             </p>
         </div>
-    </div>
-    <div style="text-align: center; padding: 20px; color: #666; font-size: 12px;">
-        David Andrews Copyright 2025 - All Rights Reserved
     </div>
 </body>
 </html>
@@ -7206,9 +6452,6 @@ function Test-EmailConfiguration {
     <p>This is a test email from VeeamItUp+ for server: $($Server.ServerName)</p>
     <p>If you received this email, your email configuration is working correctly.</p>
     <p>Timestamp: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</p>
-    <div style="text-align: center; padding: 20px; color: #666; font-size: 12px;">
-        David Andrews Copyright 2025 - All Rights Reserved
-    </div>
 </body>
 </html>
 "@
@@ -7463,7 +6706,7 @@ Write-Log "🚀 VeeamItUp+ Console started" 'SUCCESS'
 Write-Log "🤖 Using OpenAI Model: $($script:OpenAIModel)" 'SUCCESS'
 Write-Log "🌐 Initializing HTML activity log..." 'SUCCESS'
 Update-HTMLLog  # Use the HTML log function
-Limit-LogHistory -N 3
+Keep-LastNLogs -N 3
 
 # Check for OpenAI API key (don't force initialization)
 $apiKey = Get-OpenAIAPIKey
@@ -7636,7 +6879,7 @@ while ($true) {
                 Run-ReportForMappedDrive -DriveLetter $DriveLetter
                 Write-Log "✅ Report generation completed!" 'SUCCESS'
                 Update-HTMLLog
-                Limit-LogHistory -N 3
+                Keep-LastNLogs -N 3
                 Write-Log "HTML activity log updated with report generation results" 'SUCCESS'
                 Show-ReturnToMenuPrompt "✅ Report completed! Press any key to return to menu..." "Green"
                 continue
