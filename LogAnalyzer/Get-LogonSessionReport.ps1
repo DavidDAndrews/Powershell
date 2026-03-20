@@ -9,7 +9,8 @@
     Production-quality PowerShell 7+ utility that:
     - Queries Windows Security event logs (Event IDs: 4624, 4634, 4647, 4778, 4779, 4800, 4801)
     - Correlates events into per-user logon sessions using LogonId as the primary key
-    - Generates a self-contained HTML5 report with sorting, searching, and expandable details
+    - Report includes: User names, Logon events (4624), Logoff events (4634/4647), Access (RDP vs Local), and dates/times (UTC)
+    - Generates a self-contained HTML5 report with sorting, searching, and expandable event timeline
     - Supports secure credential storage via DPAPI-encrypted registry entries
 
     Prerequisites:
@@ -21,6 +22,7 @@
         auditpol /set /subcategory:"Logoff" /success:enable
         auditpol /set /subcategory:"Other Logon/Logoff Events" /success:enable
     - Firewall: TCP 5985 (HTTP) or 5986 (HTTPS) for WinRM
+    - For workgroup or non-Kerberos: add targets to TrustedHosts on the client, or use -AddToTrustedHostsOnFailure to do it automatically when connection fails.
 
 .PARAMETER ComputerName
     One or more target computer names or IP addresses.
@@ -66,6 +68,18 @@
 
 .PARAMETER ExportCsv
     Also export a flattened CSV of sessions alongside the HTML report.
+
+.PARAMETER OpenReport
+    After the HTML report is written, open it in the default browser. Default: True.
+
+.PARAMETER AddToTrustedHostsOnFailure
+    If a machine fails with a WinRM/TrustedHosts error (e.g. not domain-joined or non-Kerberos),
+    add that machine to the client's TrustedHosts list and retry the query once.
+    Requires running from an elevated session to modify TrustedHosts.
+
+.PARAMETER PromptOnConnectionFailure
+    When a machine fails with a WinRM/TrustedHosts error, prompt to add it to TrustedHosts and retry.
+    Use this when you do not want to automatically add all failed targets.
 
 .EXAMPLE
     # Save credentials for later use
@@ -144,11 +158,27 @@ param(
 
     [Parameter(ParameterSetName = 'Query')]
     [Parameter(ParameterSetName = 'TestMode')]
-    [switch]$ExportCsv
+    [switch]$ExportCsv,
+
+    [Parameter(ParameterSetName = 'Query')]
+    [Parameter(ParameterSetName = 'TestMode')]
+    [switch]$OpenReport,
+
+    [Parameter(ParameterSetName = 'Query')]
+    [switch]$AddToTrustedHostsOnFailure,
+
+    [Parameter(ParameterSetName = 'Query')]
+    [switch]$PromptOnConnectionFailure
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+# Keep historical behavior (open report by default) without assigning a
+# default value directly on the switch parameter.
+if (-not $PSBoundParameters.ContainsKey('OpenReport')) {
+    $OpenReport = $true
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CONSTANTS
@@ -278,6 +308,97 @@ function Clear-StoredCredential {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WINRM / TRUSTEDHOSTS (for non-domain or non-Kerberos remoting)
+# ─────────────────────────────────────────────────────────────────────────────
+
+function Test-TrustedHostsConnectionError {
+    <#
+    .SYNOPSIS
+        Returns $true if the error message indicates a WinRM/TrustedHosts connection issue.
+    #>
+    [CmdletBinding()]
+    param([string]$ErrorText)
+    if ([string]::IsNullOrWhiteSpace($ErrorText)) { return $false }
+    $t = $ErrorText.ToLowerInvariant()
+    return ($t -match 'trustedhosts' -or $t -match 'winrm client cannot process' -or
+            $t -match 'authentication scheme is different from kerberos' -or
+            $t -match 'client computer is not joined to a domain' -or
+            $t -match 'destination machine must be added to the trustedhosts')
+}
+
+function Add-WinRMTrustedHost {
+    <#
+    .SYNOPSIS
+        Adds a computer name to the client's WinRM TrustedHosts list so PSRemoting can connect
+        when not using Kerberos (e.g. workgroup or cross-domain). May require elevation.
+    .OUTPUTS
+        $true if successful; $false otherwise.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$ComputerName)
+
+    try {
+        $path = 'WSMan:\localhost\Client\TrustedHosts'
+        $current = (Get-Item -Path $path -ErrorAction Stop).Value
+        $hosts = @()
+        if ($current) {
+            $hosts = $current -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+        }
+        $computer = $ComputerName.Trim()
+        if ($hosts -contains $computer -or $hosts -contains '*') {
+            Write-Verbose "TrustedHosts already includes $computer or *."
+            return $true
+        }
+        $hosts += $computer
+        $newValue = $hosts -join ','
+        Set-Item -Path $path -Value $newValue -Force -ErrorAction Stop
+        Write-Host "Added $computer to TrustedHosts. Retrying connection..." -ForegroundColor Yellow
+        return $true
+    }
+    catch {
+        Write-Warning "Could not add $ComputerName to TrustedHosts: $($_.Exception.Message). Run as Administrator and add the machine to TrustedHosts (see: winrm help config)."
+        return $false
+    }
+}
+
+function Invoke-TrustedHostsUpdateElevated {
+    <#
+    .SYNOPSIS
+        Opens an elevated PowerShell window that adds the given computer names to TrustedHosts.
+        Use when Add-WinRMTrustedHost failed with "Access is denied".
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string[]]$ComputerNames)
+
+    $list = @($ComputerNames | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+    if ($list.Count -eq 0) { return }
+    $listLiteral = ($list | ForEach-Object { "'$_'" }) -join ','
+    $scriptContent = @"
+`$path = 'WSMan:\localhost\Client\TrustedHosts'
+`$current = (Get-Item -Path `$path -ErrorAction SilentlyContinue).Value
+`$hosts = @()
+if (`$current) { `$hosts = `$current -split ',' | ForEach-Object { `$_.Trim() } | Where-Object { `$_ } }
+`$toAdd = @($listLiteral)
+foreach (`$c in `$toAdd) {
+    if (`$c -and `$hosts -notcontains `$c -and `$hosts -notcontains '*') { `$hosts += `$c }
+}
+Set-Item -Path `$path -Value (`$hosts -join ',') -Force
+Write-Host 'TrustedHosts updated. Close this window and re-run your report script.' -ForegroundColor Green
+"@
+    $tempScript = [System.IO.Path]::GetTempFileName() + '.ps1'
+    Set-Content -Path $tempScript -Value $scriptContent -Encoding UTF8 -Force
+    try {
+        Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $tempScript
+        Write-Host "An elevated PowerShell window was opened to update TrustedHosts. Approve the UAC prompt, then re-run this script." -ForegroundColor Cyan
+    }
+    catch {
+        Write-Warning "Could not start elevated process: $($_.Exception.Message). Run the following in an elevated PowerShell:"
+        Write-Host "  `$cur = (Get-Item WSMan:\localhost\Client\TrustedHosts).Value; Set-Item WSMan:\localhost\Client\TrustedHosts -Value (`"`$cur,$($list -join ',')`") -Force" -ForegroundColor Yellow
+        Write-Host "Then re-run this report script." -ForegroundColor Cyan
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EVENT RETRIEVAL
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -326,18 +447,26 @@ function Get-RemoteSecurityEvents {
     #   - ?? (null-coalescing)       - ??= (null-coalescing assignment)
     #   - ?. (null-conditional)      - ternary (condition ? a : b)
     $queryBlock = {
-        param($EventIds, $Start, $End)
+        param($StartUtc, $EndUtc)
 
-        $filter = @{
-            LogName   = 'Security'
-            Id        = $EventIds
-            StartTime = $Start
-            EndTime   = $End
+        # Query each Event ID separately (avoids FilterHashtable array/serialization issues over remoting).
+        $ids = @(4624, 4634, 4647, 4778, 4779, 4800, 4801)
+        $allEvents = [System.Collections.ArrayList]::new()
+        foreach ($id in $ids) {
+            try {
+                $filter = @{ LogName = 'Security'; Id = $id }
+                $batch = Get-WinEvent -FilterHashtable $filter -MaxEvents 10000 -ErrorAction Stop
+                if ($batch) { [void]$allEvents.AddRange($batch) }
+            } catch {
+                if ($_.Exception.Message -notmatch 'No events were found') { Write-Error $_.Exception.Message }
+            }
         }
+        if ($allEvents.Count -eq 0) { return }
+        $allEvents = $allEvents | Sort-Object TimeCreated -Descending | Select-Object -First 50000
 
-        $events = Get-WinEvent -FilterHashtable $filter -ErrorAction SilentlyContinue
-
-        foreach ($evt in $events) {
+        foreach ($evt in $allEvents) {
+            $evtUtc = $evt.TimeCreated.ToUniversalTime()
+            if ($evtUtc -lt $StartUtc -or $evtUtc -gt $EndUtc) { continue }
             # Parse XML for structured data instead of fragile message parsing
             [xml]$xml = $evt.ToXml()
             $sys = $xml.Event.System
@@ -398,14 +527,14 @@ function Get-RemoteSecurityEvents {
 
         $invokeParams = @{
             ScriptBlock  = $queryBlock
-            ArgumentList = @(,$script:EventIds), $StartTime, $EndTime
+            ArgumentList = $StartTime, $EndTime
             ErrorAction  = 'Stop'
         }
 
         if ($IsLocalhost) {
             # Run locally -- no remoting needed
             Write-Verbose "Running in local mode against $Computer"
-            $rawEvents = & $queryBlock $script:EventIds $StartTime $EndTime
+            $rawEvents = & $queryBlock $StartTime $EndTime
         }
         else {
             $invokeParams['ComputerName'] = $Computer
@@ -501,6 +630,7 @@ function Convert-EventsToSessions {
     }
 
     # ── Bucket events by type ──
+    # Include ALL 4624 logons (types 2=Interactive, 7=Unlock, 10=RDP, 11=CachedInteractive, etc.) except noise accounts.
     $logonEvents     = @($Events | Where-Object { $_.EventId -eq 4624 -and -not (Test-IsNoiseAccount $_.TargetUserName) })
     $logoffEvents    = @($Events | Where-Object { $_.EventId -in @(4634, 4647) })
     $rdpReconnects   = @($Events | Where-Object { $_.EventId -eq 4778 })
@@ -523,9 +653,12 @@ function Convert-EventsToSessions {
 
     foreach ($logon in ($logonEvents | Sort-Object TimeCreated)) {
         $lid = $logon.TargetLogonId ?? $logon.LogonId
+        # 4624: use TargetUserName + TargetDomainName (per Microsoft event 4624 schema)
         $userName = if ($logon.TargetDomainName -and $logon.TargetDomainName -ne '-') {
             "$($logon.TargetDomainName)\$($logon.TargetUserName)"
         } else { $logon.TargetUserName }
+        $userNameLower = $userName.ToLowerInvariant()
+        $userPart = ($userName -split '\\')[-1].ToLowerInvariant()
 
         $logonTypeNum = $logon.LogonType
         $logonTypeName = if ($null -ne $logonTypeNum -and $script:LogonTypeMap.ContainsKey($logonTypeNum)) {
@@ -547,10 +680,22 @@ function Convert-EventsToSessions {
             switch ($logoff.EventId) { 4634 { 'SessionEnded' } 4647 { 'UserInitiated' } default { 'Unknown' } }
         } else { $null }
 
+        # Duration = Logoff time − Logon time (for this user session, by LogonId).
+        # If no logoff event: show time from Logon to query EndTime as "Open (~Xd Xh Xm Xs)".
         $duration = if ($logoffTime) { $logoffTime - $logon.TimeCreated } else { $null }
-        $durationStr = if ($duration) {
-            '{0}d {1:D2}h {2:D2}m {3:D2}s' -f $duration.Days, $duration.Hours, $duration.Minutes, $duration.Seconds
-        } else { 'Open (no logoff)' }
+        $durationStr = $null
+        $durationFormula = $null
+        if ($duration) {
+            $durationStr = '{0}d {1:D2}h {2:D2}m {3:D2}s' -f $duration.Days, $duration.Hours, $duration.Minutes, $duration.Seconds
+            $durationFormula = "Logoff − Logon = $durationStr"
+        } else {
+            $sessionEndForDuration = if ($logoffTime) { $logoffTime } else { $EndTime }
+            $openSpan = $sessionEndForDuration - $logon.TimeCreated
+            $openStr = '{0}d {1:D2}h {2:D2}m {3:D2}s' -f $openSpan.Days, $openSpan.Hours, $openSpan.Minutes, $openSpan.Seconds
+            $durationStr = "Open (~$openStr)"
+            $durationFormula = "No logoff event; time from Logon to query end = $openStr"
+        }
+        $durationTotalSeconds = if ($duration) { [int]$duration.TotalSeconds } else { [int]$openSpan.TotalSeconds }
 
         # ── Build timeline ──
         $timeline = [System.Collections.Generic.List[PSCustomObject]]::new()
@@ -575,11 +720,14 @@ function Convert-EventsToSessions {
             if ($lid -and ($rdpEvt.LogonId -eq $lid -or $rdpEvt.SubjectLogonId -eq $lid)) {
                 $matched = $true; $conf = 'High'
             }
-            # Secondary: same user + time window + prefer RDP sessions
+            # Secondary: same user + time window + prefer RDP sessions (4778/4779 use AccountName/AccountDomain or SubjectUserName)
             elseif (-not $matched) {
                 $rdpUser = if ($rdpEvt.AccountDomain) { "$($rdpEvt.AccountDomain)\$($rdpEvt.AccountName)" }
                            else { $rdpEvt.AccountName ?? $rdpEvt.SubjectUserName }
-                if ($rdpUser -eq $userName -and
+                $rdpUserLower = $rdpUser.ToLowerInvariant()
+                $rdpPart = ($rdpUser -split '\\')[-1].ToLowerInvariant()
+                $sameUser = ($rdpUserLower -eq $userNameLower) -or ($rdpPart -eq $userPart)
+                if ($sameUser -and
                     $rdpEvt.TimeCreated -ge $logon.TimeCreated -and
                     $rdpEvt.TimeCreated -le $sessionEnd -and
                     $logonTypeNum -eq 10) {
@@ -608,7 +756,10 @@ function Convert-EventsToSessions {
             elseif (-not $matched) {
                 $rdpUser = if ($rdpEvt.AccountDomain) { "$($rdpEvt.AccountDomain)\$($rdpEvt.AccountName)" }
                            else { $rdpEvt.AccountName ?? $rdpEvt.SubjectUserName }
-                if ($rdpUser -eq $userName -and
+                $rdpUserLower = $rdpUser.ToLowerInvariant()
+                $rdpPart = ($rdpUser -split '\\')[-1].ToLowerInvariant()
+                $sameUser = ($rdpUserLower -eq $userNameLower) -or ($rdpPart -eq $userPart)
+                if ($sameUser -and
                     $rdpEvt.TimeCreated -ge $logon.TimeCreated -and
                     $rdpEvt.TimeCreated -le $sessionEnd -and
                     $logonTypeNum -eq 10) {
@@ -639,10 +790,14 @@ function Convert-EventsToSessions {
                 $matched = $true; $conf = 'High'
             }
             elseif (-not $matched) {
+                # 4800/4801 use SubjectUserName, SubjectDomainName
                 $lockUser = if ($lockEvt.SubjectDomainName -and $lockEvt.SubjectDomainName -ne '-') {
                     "$($lockEvt.SubjectDomainName)\$($lockEvt.SubjectUserName)"
                 } else { $lockEvt.SubjectUserName }
-                if ($lockUser -eq $userName -and
+                $lockUserLower = $lockUser.ToLowerInvariant()
+                $lockPart = ($lockUser -split '\\')[-1].ToLowerInvariant()
+                $sameUser = ($lockUserLower -eq $userNameLower) -or ($lockPart -eq $userPart)
+                if ($sameUser -and
                     $lockEvt.TimeCreated -ge $logon.TimeCreated -and
                     $lockEvt.TimeCreated -le $sessionEnd) {
                     $matched = $true; $conf = 'Medium'
@@ -672,7 +827,10 @@ function Convert-EventsToSessions {
                 $unlockUser = if ($unlockEvt.SubjectDomainName -and $unlockEvt.SubjectDomainName -ne '-') {
                     "$($unlockEvt.SubjectDomainName)\$($unlockEvt.SubjectUserName)"
                 } else { $unlockEvt.SubjectUserName }
-                if ($unlockUser -eq $userName -and
+                $unlockUserLower = $unlockUser.ToLowerInvariant()
+                $unlockPart = ($unlockUser -split '\\')[-1].ToLowerInvariant()
+                $sameUser = ($unlockUserLower -eq $userNameLower) -or ($unlockPart -eq $userPart)
+                if ($sameUser -and
                     $unlockEvt.TimeCreated -ge $logon.TimeCreated -and
                     $unlockEvt.TimeCreated -le $sessionEnd) {
                     $matched = $true; $conf = 'Medium'
@@ -745,6 +903,23 @@ function Convert-EventsToSessions {
             $notes.Add("RDP disconnected $rdpDiscCount time(s)")
         }
 
+        # Access category for report: RDP (remote) vs Local vs Network/Other
+        $accessType = switch ($logonTypeNum) {
+            10 { 'RDP' }      # RemoteInteractive
+            12 { 'RDP' }      # CachedRemoteInteractive
+            2  { 'Local' }    # Interactive
+            7  { 'Local' }    # Unlock
+            11 { 'Local' }    # CachedInteractive
+            13 { 'Local' }    # CachedUnlock
+            3  { 'Network' }  # Network
+            4  { 'Batch' }
+            5  { 'Service' }
+            8  { 'Network' }
+            9  { 'Network' }
+            0  { 'System' }
+            default { 'Other' }
+        }
+
         $session = [PSCustomObject]@{
             PSTypeName        = 'LogonSession'
             ComputerName      = $ComputerName
@@ -754,8 +929,11 @@ function Convert-EventsToSessions {
             LogoffTime        = $logoffTime
             SessionDuration   = $duration
             DurationDisplay   = $durationStr
+            DurationFormula   = $durationFormula
+            DurationTotalSeconds = $durationTotalSeconds
             ActiveTime        = $activeTime
             ActiveTimeDisplay = $activeTimeStr ?? 'N/A'
+            AccessType        = $accessType
             LogonType         = $logonTypeName
             LogonTypeId       = $logonTypeNum
             SourceIP          = $logon.IpAddress
@@ -815,6 +993,12 @@ function New-LogonReportHtml {
     foreach ($r in $Results) {
         if ($r.QueryStatus -ne 'Success' -and -not $IncludeFailures) { continue }
 
+        $rdpCount = @($r.Sessions | Where-Object { $_.AccessType -eq 'RDP' }).Count
+        $localCount = @($r.Sessions | Where-Object { $_.AccessType -eq 'Local' }).Count
+        $accessSummary = @()
+        if ($rdpCount -gt 0) { $accessSummary += "$rdpCount RDP" }
+        if ($localCount -gt 0) { $accessSummary += "$localCount Local" }
+        $accessSummaryStr = if ($accessSummary.Count -gt 0) { $accessSummary -join ', ' } else { '' }
         [void]$machineSectionsHtml.Append(@"
         <div class="machine-section">
             <h2 class="machine-header" onclick="toggleSection(this)">
@@ -822,6 +1006,7 @@ function New-LogonReportHtml {
                 $(HEnc $r.ComputerName)
                 <span class="badge $(if ($r.QueryStatus -eq 'Success') {'badge-ok'} else {'badge-err'})">$($r.QueryStatus)</span>
                 <span class="badge badge-info">$(@($r.Sessions).Count) sessions</span>
+                $(if ($accessSummaryStr) {"<span class='badge badge-access'>$accessSummaryStr</span>"})
                 $(if ($r.QueryTime) {"<span class='badge badge-info'>Query: $($r.QueryTime.TotalSeconds.ToString('F1'))s</span>"})
             </h2>
             <div class="machine-body" style="display:none;">
@@ -840,11 +1025,12 @@ function New-LogonReportHtml {
                     <thead>
                         <tr>
                             <th data-sort="string" onclick="sortTable(this)">User &#x25B4;&#x25BE;</th>
+                            <th data-sort="string" onclick="sortTable(this)">Access &#x25B4;&#x25BE;</th>
                             <th data-sort="date" onclick="sortTable(this)">Logon Time &#x25B4;&#x25BE;</th>
                             <th data-sort="date" onclick="sortTable(this)">Logoff Time &#x25B4;&#x25BE;</th>
-                            <th data-sort="number" onclick="sortTable(this)">Duration &#x25B4;&#x25BE;</th>
-                            <th data-sort="number" onclick="sortTable(this)">Active Time &#x25B4;&#x25BE;</th>
-                            <th data-sort="string" onclick="sortTable(this)">Type &#x25B4;&#x25BE;</th>
+                            <th data-sort="number" onclick="sortTable(this)" title="Logoff time minus Logon time for this session">Duration (Logoff − Logon) &#x25B4;&#x25BE;</th>
+                            <th data-sort="number" onclick="sortTable(this)" title="Duration minus time spent locked">Active Time &#x25B4;&#x25BE;</th>
+                            <th data-sort="string" onclick="sortTable(this)">Logon Type &#x25B4;&#x25BE;</th>
                             <th data-sort="string" onclick="sortTable(this)">Source IP &#x25B4;&#x25BE;</th>
                             <th data-sort="string" onclick="sortTable(this)">Workstation &#x25B4;&#x25BE;</th>
                             <th>Notes</th>
@@ -859,16 +1045,18 @@ function New-LogonReportHtml {
                 $rowClass = if ($rowIdx % 2 -eq 0) { 'row-even' } else { 'row-odd' }
                 $logonTimeStr = if ($s.LogonTime) { $s.LogonTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '-' }
                 $logoffTimeStr = if ($s.LogoffTime) { $s.LogoffTime.ToString('yyyy-MM-dd HH:mm:ss') } else { '-' }
-                $durationSec = if ($s.SessionDuration) { [int]$s.SessionDuration.TotalSeconds } else { 0 }
+                $durationSec = if ($null -ne $s.DurationTotalSeconds) { $s.DurationTotalSeconds } elseif ($s.SessionDuration) { [int]$s.SessionDuration.TotalSeconds } else { 0 }
                 $activeSec = if ($s.ActiveTime) { [int]$s.ActiveTime.TotalSeconds } else { 0 }
                 $detailId = "detail-$($r.ComputerName)-$rowIdx" -replace '[^a-zA-Z0-9_-]', '_'
 
+                $accessClass = switch ($s.AccessType) { 'RDP' { 'access-rdp' } 'Local' { 'access-local' } default { '' } }
                 [void]$machineSectionsHtml.Append(@"
                         <tr class="$rowClass">
                             <td>$(HEnc $s.User)</td>
+                            <td class="$accessClass" data-value="$(HEnc $s.AccessType)">$(HEnc $s.AccessType)</td>
                             <td data-value="$logonTimeStr">$logonTimeStr</td>
                             <td data-value="$logoffTimeStr">$logoffTimeStr</td>
-                            <td data-value="$durationSec">$(HEnc $s.DurationDisplay)</td>
+                            <td data-value="$durationSec" title="$(HEnc ($s.DurationFormula ?? ''))">$(HEnc ($s.DurationDisplay ?? '—'))</td>
                             <td data-value="$activeSec">$(HEnc $s.ActiveTimeDisplay)</td>
                             <td>$(HEnc $s.LogonType)</td>
                             <td>$(HEnc ($s.SourceIP ?? '-'))</td>
@@ -877,24 +1065,28 @@ function New-LogonReportHtml {
                             <td><button class="btn-detail" onclick="toggleDetail('$detailId')">Timeline</button></td>
                         </tr>
                         <tr id="$detailId" class="detail-row" style="display:none;">
-                            <td colspan="10">
+                            <td colspan="11">
                                 <div class="timeline-box">
                                     <div class="timeline-meta">
+                                        <strong>Duration:</strong> $(HEnc ($s.DurationFormula ?? $s.DurationDisplay)) |
                                         LogonId: <code>$(HEnc ($s.LogonId ?? 'N/A'))</code> |
                                         Auth: <code>$(HEnc ($s.AuthPackage ?? 'N/A'))</code> |
                                         Process: <code>$(HEnc ($s.ProcessName ?? 'N/A'))</code> |
                                         Locked: $([Math]::Round($s.LockedSeconds / 60, 1)) min
                                     </div>
                                     <table class="timeline-table">
-                                        <thead><tr><th>Time (UTC)</th><th>Event</th><th>Detail</th><th>Confidence</th></tr></thead>
+                                        <thead><tr><th>Time (UTC)</th><th>Logon/Logoff</th><th>Event</th><th>Detail</th><th>Confidence</th></tr></thead>
                                         <tbody>
 "@)
 
                 foreach ($te in $s.Events) {
                     $confClass = switch ($te.Confidence) { 'High' { 'conf-high' } 'Medium' { 'conf-med' } default { 'conf-low' } }
+                    $eventKind = switch ($te.EventId) { 4624 { 'Logon' } 4634 { 'Logoff' } 4647 { 'Logoff' } default { 'Other' } }
+                    $kindClass = switch ($te.EventId) { 4624 { 'kind-logon' } 4634 { 'kind-logoff' } 4647 { 'kind-logoff' } default { '' } }
                     [void]$machineSectionsHtml.Append(@"
                                             <tr>
                                                 <td>$($te.Time.ToString('yyyy-MM-dd HH:mm:ss'))</td>
+                                                <td><span class="event-kind $kindClass">$(HEnc $eventKind)</span></td>
                                                 <td><span class="evt-badge evt-$($te.EventId)">$($te.EventId)</span> $(HEnc $te.Type)</td>
                                                 <td>$(HEnc $te.Detail)</td>
                                                 <td><span class="$confClass">$(HEnc $te.Confidence)</span></td>
@@ -915,7 +1107,12 @@ function New-LogonReportHtml {
             [void]$machineSectionsHtml.Append("</tbody></table>")
         }
         else {
-            [void]$machineSectionsHtml.Append("<p class='no-data'>No sessions found for this machine in the query window.</p>")
+            $noDataMsg = if ($null -eq $r.EventCount -or $r.EventCount -eq 0) {
+                "No security events found in the query window. On the target, run: auditpol /get /subcategory:Logon and auditpol /get /subcategory:Logoff (Success must be enabled). The query uses the target machine local time for the window."
+            } else {
+                "No user sessions could be correlated from $($r.EventCount) event(s). Events may be logoff-only or from system accounts. Ensure audit policy includes: Logon, Logoff, Other Logon/Logoff Events."
+            }
+            [void]$machineSectionsHtml.Append("<p class='no-data'>$(HEnc $noDataMsg)</p>")
         }
 
         [void]$machineSectionsHtml.Append("</div></div>")
@@ -944,6 +1141,7 @@ function New-LogonReportHtml {
     }
     h1 { font-size: 1.75rem; font-weight: 700; margin-bottom: 0.5rem; color: var(--accent); }
     .report-meta { color: var(--text-muted); font-size: 0.85rem; margin-bottom: 2rem; }
+    .report-desc { color: var(--text-muted); font-size: 0.9rem; margin: -0.5rem 0 1rem 0; }
     .summary-grid {
         display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         gap: 1rem; margin-bottom: 2rem;
@@ -974,6 +1172,9 @@ function New-LogonReportHtml {
     .badge-ok { background: rgba(74,222,128,0.15); color: var(--green); }
     .badge-err { background: rgba(248,113,113,0.15); color: var(--red); }
     .badge-info { background: rgba(56,189,248,0.12); color: var(--accent); }
+    .badge-access { background: rgba(167,139,250,0.15); color: #a78bfa; }
+    .access-rdp { color: var(--accent); font-weight: 600; }
+    .access-local { color: var(--green); font-weight: 600; }
     .error-box {
         background: rgba(248,113,113,0.1); border: 1px solid var(--red);
         border-radius: 6px; padding: 0.75rem 1rem; margin-bottom: 1rem;
@@ -1034,6 +1235,9 @@ function New-LogonReportHtml {
     .evt-4624 { background: rgba(74,222,128,0.2); color: var(--green); }
     .evt-4634, .evt-4647 { background: rgba(248,113,113,0.2); color: var(--red); }
     .evt-4778 { background: rgba(56,189,248,0.2); color: var(--accent); }
+    .event-kind { font-weight: 700; text-transform: uppercase; font-size: 0.7rem; padding: 0.15rem 0.4rem; border-radius: 3px; }
+    .kind-logon { background: rgba(74,222,128,0.25); color: var(--green); }
+    .kind-logoff { background: rgba(248,113,113,0.25); color: var(--red); }
     .evt-4779 { background: rgba(251,191,36,0.2); color: var(--yellow); }
     .evt-4800 { background: rgba(192,132,252,0.2); color: var(--purple); }
     .evt-4801 { background: rgba(192,132,252,0.15); color: var(--purple); }
@@ -1055,6 +1259,7 @@ function New-LogonReportHtml {
 <body>
 
 <h1>Windows Logon Session Report</h1>
+<p class="report-desc">User names, logon and logoff events, RDP vs Local access, with dates and times (UTC). Duration = Logoff time − Logon time per session (or time since logon if no logoff event).</p>
 <div class="report-meta">
     Generated: $generatedAt |
     Query window: $($StartTime.ToString('yyyy-MM-dd HH:mm')) &ndash; $($EndTime.ToString('yyyy-MM-dd HH:mm')) UTC
@@ -1231,6 +1436,8 @@ Write-Verbose "Query window (UTC): $($StartTime.ToString('yyyy-MM-dd HH:mm:ss'))
 
 # ── Query each machine ──
 $allResults = [System.Collections.Generic.List[PSCustomObject]]::new()
+$hadTrustedHostsFailure = $false
+$failedToAddTrustedHosts = [System.Collections.Generic.List[string]]::new()
 
 foreach ($target in $uniqueTargets) {
     Write-Verbose "Processing: $target"
@@ -1250,6 +1457,33 @@ foreach ($target in $uniqueTargets) {
     }
 
     $queryResult = Get-RemoteSecurityEvents @queryParams
+
+    # On WinRM/TrustedHosts failure, optionally add to TrustedHosts and retry once
+    if ($queryResult.QueryStatus -eq 'Failed' -and -not $queryParams['IsLocalhost']) {
+        $isTrustedHostsError = Test-TrustedHostsConnectionError -ErrorText $queryResult.Error
+        if ($isTrustedHostsError) { $hadTrustedHostsFailure = $true }
+        $doRetry = $false
+        $wantedToAdd = $false
+        if ($isTrustedHostsError) {
+            if ($AddToTrustedHostsOnFailure) {
+                $wantedToAdd = $true
+                $doRetry = Add-WinRMTrustedHost -ComputerName $target
+            }
+            elseif ($PromptOnConnectionFailure) {
+                $response = Read-Host "Add '$target' to TrustedHosts and retry? (Y/n)"
+                if ($response -notmatch '^n') {
+                    $wantedToAdd = $true
+                    $doRetry = Add-WinRMTrustedHost -ComputerName $target
+                }
+            }
+        }
+        if ($wantedToAdd -and -not $doRetry) {
+            $failedToAddTrustedHosts.Add($target)
+        }
+        if ($doRetry) {
+            $queryResult = Get-RemoteSecurityEvents @queryParams
+        }
+    }
 
     # Correlate events into sessions
     if ($queryResult.QueryStatus -eq 'Success' -and $queryResult.Events.Count -gt 0) {
@@ -1272,6 +1506,30 @@ foreach ($target in $uniqueTargets) {
     $allResults.Add($workstationResult)
 }
 
+if ($hadTrustedHostsFailure -and -not $AddToTrustedHostsOnFailure -and -not $PromptOnConnectionFailure) {
+    Write-Host ""
+    Write-Host "Tip: Some machines failed due to WinRM/TrustedHosts. To add them and retry, run with:" -ForegroundColor Yellow
+    Write-Host "  -AddToTrustedHostsOnFailure   (add all failed machines to TrustedHosts and retry automatically)" -ForegroundColor Cyan
+    Write-Host "  -PromptOnConnectionFailure   (prompt to add each failed machine to TrustedHosts and retry)" -ForegroundColor Cyan
+    Write-Host ""
+}
+
+if ($failedToAddTrustedHosts.Count -gt 0) {
+    Write-Host ""
+    $hostList = $failedToAddTrustedHosts -join ', '
+    Write-Host "Could not add the following to TrustedHosts (Access denied): $hostList" -ForegroundColor Yellow
+    $response = Read-Host "Open an elevated (Administrator) window to add them to TrustedHosts now? (Y/n)"
+    if ($response -notmatch '^n') {
+        Invoke-TrustedHostsUpdateElevated -ComputerNames $failedToAddTrustedHosts
+    }
+    else {
+        Write-Host "To add manually, run PowerShell as Administrator and run:" -ForegroundColor Cyan
+        Write-Host "  Set-Item WSMan:\localhost\Client\TrustedHosts -Value '$(($failedToAddTrustedHosts | Select-Object -Unique) -join ',')' -Force" -ForegroundColor White
+        Write-Host "Then re-run this report script." -ForegroundColor Cyan
+    }
+    Write-Host ""
+}
+
 # ── Generate outputs ──
 $basePath = Join-Path $OutputPath $ReportName
 
@@ -1281,6 +1539,16 @@ $html = New-LogonReportHtml -Results $allResults -StartTime $StartTime -EndTime 
 $htmlPath = "$basePath.html"
 $html | Out-File -FilePath $htmlPath -Encoding utf8 -Force
 Write-Host "HTML report saved: $htmlPath" -ForegroundColor Green
+
+if ($OpenReport -and (Test-Path -LiteralPath $htmlPath -PathType Leaf)) {
+    try {
+        Start-Process -FilePath $htmlPath
+        Write-Host "Report opened in default browser." -ForegroundColor Cyan
+    }
+    catch {
+        Write-Warning "Could not open report in browser: $($_.Exception.Message). Open manually: $htmlPath"
+    }
+}
 
 # Optional JSON export
 if ($ExportJson) {
@@ -1297,6 +1565,7 @@ if ($ExportCsv) {
             [PSCustomObject]@{
                 ComputerName      = $s.ComputerName
                 User              = $s.User
+                AccessType        = $s.AccessType
                 LogonId           = $s.LogonId
                 LogonTime         = $s.LogonTime
                 LogoffTime        = $s.LogoffTime
