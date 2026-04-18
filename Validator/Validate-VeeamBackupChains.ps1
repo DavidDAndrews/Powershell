@@ -181,7 +181,8 @@ function Find-VeeamBackupJobs {
     $knownJobPaths = @()
     
     # 1. Scan for VBM files (Metadata) - Single Pass with -File
-    $vbmFiles = Get-ChildItem -Path $Path -Recurse -File -Filter "*.vbm" -ErrorAction SilentlyContinue
+    # @() ensures an empty array rather than $null when no files match — required for .Count under Set-StrictMode
+    $vbmFiles = @(Get-ChildItem -Path $Path -Recurse -File -Filter "*.vbm" -ErrorAction SilentlyContinue)
     
     foreach ($vbm in $vbmFiles) {
         $jobPath = $vbm.DirectoryName
@@ -191,24 +192,29 @@ function Find-VeeamBackupJobs {
         $jobName = [System.IO.Path]::GetFileNameWithoutExtension($vbm.Name)
         
         # Find associated files in the same directory
-        $vbkFiles = Get-ChildItem -Path $jobPath -File -Filter "*.vbk" -ErrorAction SilentlyContinue
-        $vibFiles = Get-ChildItem -Path $jobPath -File -Filter "*.vib" -ErrorAction SilentlyContinue
-        
+        $vbkFiles = @(Get-ChildItem -Path $jobPath -File -Filter "*.vbk" -ErrorAction SilentlyContinue)
+        $vibFiles = @(Get-ChildItem -Path $jobPath -File -Filter "*.vib" -ErrorAction SilentlyContinue)
+
+        # Accumulate size with foreach: Measure-Object returns $null (not a MeasureInfo) for
+        # empty collections under PS 5.1 Set-StrictMode, so .Sum would throw
+        $jobTotalBytes = [long]0
+        foreach ($f in $vbkFiles) { $jobTotalBytes += $f.Length }
+        foreach ($f in $vibFiles) { $jobTotalBytes += $f.Length }
+
         $backupJobs[$jobName] = @{
-            Name = $jobName
-            Path = $jobPath
-            VBMFile = $vbm.FullName
-            FullBackups = $vbkFiles
+            Name               = $jobName
+            Path               = $jobPath
+            VBMFile            = $vbm.FullName
+            FullBackups        = $vbkFiles
             IncrementalBackups = $vibFiles
-            TotalFiles = $vbkFiles.Count + $vibFiles.Count
-            TotalSize = ($vbkFiles | Measure-Object -Property Length -Sum).Sum + 
-                       ($vibFiles | Measure-Object -Property Length -Sum).Sum
+            TotalFiles         = $vbkFiles.Count + $vibFiles.Count
+            TotalSize          = $jobTotalBytes
         }
     }
     
     # 2. Scan for Orphaned Files (VBK/VIB without VBM)
     # We scan for VBK files to establish the job identity, then check for VIBs
-    $allVbkFiles = Get-ChildItem -Path $Path -Recurse -File -Filter "*.vbk" -ErrorAction SilentlyContinue
+    $allVbkFiles = @(Get-ChildItem -Path $Path -Recurse -File -Filter "*.vbk" -ErrorAction SilentlyContinue)
     
     foreach ($vbk in $allVbkFiles) {
         $jobPath = $vbk.DirectoryName
@@ -227,7 +233,7 @@ function Find-VeeamBackupJobs {
         if (-not $backupJobs.ContainsKey("$jobName-Orphaned")) {
             Write-Log "Found orphaned backup files for job: $jobName" -Level Warning
             
-            $vibFiles = Get-ChildItem -Path $jobPath -File -Filter "$jobName*.vib" -ErrorAction SilentlyContinue
+            $vibFiles = @(Get-ChildItem -Path $jobPath -File -Filter "$jobName*.vib" -ErrorAction SilentlyContinue)
             
             $backupJobs["$jobName-Orphaned"] = @{
                 Name = "$jobName-Orphaned"
@@ -509,15 +515,15 @@ function New-ValidationSummaryReport {
             </div>
             <div class="summary-card success">
                 <h3>Successful</h3>
-                <div class="value">$(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count)</div>
+                <div class="value">$(@($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count)</div>
             </div>
             <div class="summary-card warning">
                 <h3>Partial Success</h3>
-                <div class="value">$(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'PartialSuccess' }).Count)</div>
+                <div class="value">$(@($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'PartialSuccess' }).Count)</div>
             </div>
             <div class="summary-card error">
                 <h3>Failed</h3>
-                <div class="value">$(($Results | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count)</div>
+                <div class="value">$(@($Results | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count)</div>
             </div>
         </div>
 
@@ -634,8 +640,8 @@ function Send-TeamsNotification {
         return
     }
 
-    $successCount = ($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count
-    $failedCount = ($Results | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count
+    $successCount = @($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count
+    $failedCount  = @($Results | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count
     
     $color = if ($failedCount -gt 0) { "FF0000" } else { "008000" }
     
@@ -731,7 +737,7 @@ function Start-ValidationWorkflow {
         }
 
         # Exit code: 0 = all passed, 3 = one or more validation failures
-        $failedCount = ($validationResults | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count
+        $failedCount = @($validationResults | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count
         $exitCode = if ($failedCount -gt 0) { 3 } else { 0 }
         Write-Log "Validation complete. $($validationResults.Count) jobs processed, $failedCount failed." -Level Success
         return $exitCode

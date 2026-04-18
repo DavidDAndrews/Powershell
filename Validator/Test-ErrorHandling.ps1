@@ -162,6 +162,31 @@ Invoke-ScriptTest -Name 'T5: Empty DatastorePath rejected by path guard' `
     -ExpectedExit 1 `
     -LogPattern   'not found|Invalid|inaccessible'
 
+# T7 ── Datastore contains a .vbm file but no .vbk/.vib files
+#        Get-ChildItem returns $null (not @()) for empty results; previously caused
+#        "The property 'Count' cannot be found" under Set-StrictMode -Version Latest
+#        Uses a .cmd stub as the validator so the process exits immediately (notepad hangs).
+$datastoreWithVbm = Join-Path $TempBase 'DatastoreWithVbm'
+New-Item $datastoreWithVbm -ItemType Directory -Force | Out-Null
+New-Item (Join-Path $datastoreWithVbm 'BackupJob.vbm') -ItemType File -Force | Out-Null  # no .vbk or .vib
+
+# where.exe: always present on Windows, exits immediately with code 1 when given
+# unrecognised arguments — safe for -NoNewWindow -RedirectStandardOutput, no GUI.
+# Expected exit 3: script reaches Validation complete (bug fix confirmed) but
+# where.exe returns non-zero, so the job is counted as a validation failure.
+# WITHOUT the @() fix, Get-ChildItem returns $null and $null.Count throws under
+# StrictMode, the outer catch fires, and the script exits 1 instead.
+$whereExe = Join-Path $env:SystemRoot 'System32\where.exe'
+
+Invoke-ScriptTest -Name 'T7: .vbm present but no .vbk/.vib (StrictMode .Count regression)' `
+    -Params @{
+        ValidatorPath  = $whereExe
+        DatastorePath  = $datastoreWithVbm
+        ReportPath     = (Join-Path $TempBase 'rpt_t7')
+    } `
+    -ExpectedExit 3 `
+    -LogPattern   'Validation complete'
+
 # T6 ── Verify log is absent / $Script:LogFile=$null before Initialize-Environment,
 #        meaning no crash under Set-StrictMode -Version Latest at startup.
 #        If the script crashes on startup, it produces a ParseError on stderr → FAIL.
