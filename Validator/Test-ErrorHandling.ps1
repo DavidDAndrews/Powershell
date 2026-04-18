@@ -109,9 +109,10 @@ Write-Host ''
 #        Test-ValidatorExecutable fails → exit 1
 Invoke-ScriptTest -Name 'T1: Validator executable not found' `
     -Params @{
-        ValidatorPath  = 'C:\NoSuchFolder\Veeam.Backup.Validator.exe'
-        DatastorePath  = $EmptyDatastore
-        ReportPath     = (Join-Path $TempBase 'rpt_t1')
+        ValidatorPath        = 'C:\NoSuchFolder\Veeam.Backup.Validator.exe'
+        DatastorePath        = $EmptyDatastore
+        ReportPath           = (Join-Path $TempBase 'rpt_t1')
+        SkipElevationCheck   = $true
     } `
     -ExpectedExit 1 `
     -LogPattern   'Cannot proceed|not found'
@@ -120,9 +121,10 @@ Invoke-ScriptTest -Name 'T1: Validator executable not found' `
 #        Uses notepad.exe as a stand-in to pass the validator check
 Invoke-ScriptTest -Name 'T2: Datastore path does not exist' `
     -Params @{
-        ValidatorPath  = $FakeValidatorExe
-        DatastorePath  = "C:\NoSuchDatastore_$(Get-Random)"
-        ReportPath     = (Join-Path $TempBase 'rpt_t2')
+        ValidatorPath        = $FakeValidatorExe
+        DatastorePath        = "C:\NoSuchDatastore_$(Get-Random)"
+        ReportPath           = (Join-Path $TempBase 'rpt_t2')
+        SkipElevationCheck   = $true
     } `
     -ExpectedExit 1 `
     -LogPattern   'Datastore path not found'
@@ -130,9 +132,10 @@ Invoke-ScriptTest -Name 'T2: Datastore path does not exist' `
 # T3 ── Valid but empty datastore → no .vbm/.vbk files → exit 2
 Invoke-ScriptTest -Name 'T3: No backup jobs found (empty datastore)' `
     -Params @{
-        ValidatorPath  = $FakeValidatorExe
-        DatastorePath  = $EmptyDatastore
-        ReportPath     = (Join-Path $TempBase 'rpt_t3')
+        ValidatorPath        = $FakeValidatorExe
+        DatastorePath        = $EmptyDatastore
+        ReportPath           = (Join-Path $TempBase 'rpt_t3')
+        SkipElevationCheck   = $true
     } `
     -ExpectedExit 2 `
     -LogPattern   'No Veeam backup jobs'
@@ -143,9 +146,10 @@ $freshReportDir = Join-Path $TempBase 'rpt_t4_new'
 # Deliberately do NOT pre-create this directory
 Invoke-ScriptTest -Name 'T4: New report dir auto-created, log file written' `
     -Params @{
-        ValidatorPath  = $FakeValidatorExe
-        DatastorePath  = $EmptyDatastore
-        ReportPath     = $freshReportDir
+        ValidatorPath        = $FakeValidatorExe
+        DatastorePath        = $EmptyDatastore
+        ReportPath           = $freshReportDir
+        SkipElevationCheck   = $true
     } `
     -ExpectedExit 2 `
     -LogPattern   'Veeam Backup Chain Validation Started'
@@ -155,9 +159,10 @@ Invoke-ScriptTest -Name 'T4: New report dir auto-created, log file written' `
 #        line to stdin and rely on the subsequent path-not-found guard → exit 1
 Invoke-ScriptTest -Name 'T5: Empty DatastorePath rejected by path guard' `
     -Params @{
-        ValidatorPath  = $FakeValidatorExe
-        DatastorePath  = ' '    # single space → IsNullOrWhiteSpace guard fires
-        ReportPath     = (Join-Path $TempBase 'rpt_t5')
+        ValidatorPath        = $FakeValidatorExe
+        DatastorePath        = ' '    # single space → IsNullOrWhiteSpace guard fires
+        ReportPath           = (Join-Path $TempBase 'rpt_t5')
+        SkipElevationCheck   = $true
     } `
     -ExpectedExit 1 `
     -LogPattern   'not found|Invalid|inaccessible'
@@ -180,9 +185,10 @@ $whereExe = Join-Path $env:SystemRoot 'System32\where.exe'
 
 Invoke-ScriptTest -Name 'T7: .vbm present but no .vbk/.vib (StrictMode .Count regression)' `
     -Params @{
-        ValidatorPath  = $whereExe
-        DatastorePath  = $datastoreWithVbm
-        ReportPath     = (Join-Path $TempBase 'rpt_t7')
+        ValidatorPath        = $whereExe
+        DatastorePath        = $datastoreWithVbm
+        ReportPath           = (Join-Path $TempBase 'rpt_t7')
+        SkipElevationCheck   = $true
     } `
     -ExpectedExit 3 `
     -LogPattern   'Validation complete'
@@ -194,7 +200,7 @@ Write-Host ''
 Write-Host '  [INFO] T6: StrictMode startup check (no $Script:ReportPath crash)' -ForegroundColor Cyan
 $outT6  = Join-Path $TempBase 'stdout_T6.txt'
 $errT6  = Join-Path $TempBase 'stderr_T6.txt'
-$argsT6 = "-NoProfile -NonInteractive -File `"$ScriptUnderTest`" -ValidatorPath `"C:\Fake.exe`" -DatastorePath `"$EmptyDatastore`" -ReportPath `"$(Join-Path $TempBase 'rpt_t6')`""
+$argsT6 = "-NoProfile -NonInteractive -File `"$ScriptUnderTest`" -ValidatorPath `"C:\Fake.exe`" -DatastorePath `"$EmptyDatastore`" -ReportPath `"$(Join-Path $TempBase 'rpt_t6')`" -SkipElevationCheck"
 $procT6 = Start-Process pwsh -ArgumentList $argsT6 -NoNewWindow -Wait -PassThru `
               -RedirectStandardOutput $outT6 -RedirectStandardError $errT6
 $stderrT6 = Get-Content $errT6 -Raw -ErrorAction SilentlyContinue

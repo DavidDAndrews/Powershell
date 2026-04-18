@@ -35,13 +35,20 @@
 .PARAMETER TeamsWebhookUrl
     The URL of the Microsoft Teams Incoming Webhook.
 
+.PARAMETER SkipElevationCheck
+    If specified, suppresses the automatic UAC re-launch when the session is not elevated.
+    Useful for scheduled tasks that already run as SYSTEM, CI pipelines, or test harnesses.
+
 .EXAMPLE
     .\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups" -ReportPath "C:\Reports"
 
 .NOTES
     Author: PowerShell Validator Script (Refactored)
-    Version: 2.0
+    Version: 2.1
     Requires: Veeam Backup & Replication with Validator component installed
+    Elevation: The script automatically re-launches itself with administrator privileges
+               via UAC if the current session is not elevated. Pass -SkipElevationCheck
+               to suppress this behaviour.
 #>
 
 [CmdletBinding()]
@@ -68,8 +75,10 @@ param(
     [switch]$ExportJson,
     
     [switch]$SendTeamsNotification,
-    
-    [string]$TeamsWebhookUrl
+
+    [string]$TeamsWebhookUrl,
+
+    [switch]$SkipElevationCheck
 )
 
 # Strict Mode for better error checking
@@ -93,6 +102,50 @@ $Script:Config = @{
 $Script:ValidationResults = @()
 $Script:LogFile    = $null  # Set by Initialize-Environment after report directory is confirmed to exist
 $Script:SummaryReport = $null  # Set by Initialize-Environment after report directory is confirmed to exist
+
+#region Self-Elevation
+
+# If the session is not running as Administrator, re-launch with elevated privileges via UAC.
+# The same PowerShell host that invoked this script is used so pwsh / powershell compatibility
+# is preserved automatically.
+#
+# Limitations:
+#   - PSCredential (-Credential) cannot be serialised across a process boundary and will be
+#     omitted; the elevated session will prompt for credentials again if required.
+#   - Pass -SkipElevationCheck to suppress this behaviour (scheduled tasks, CI, test harnesses).
+if (-not $SkipElevationCheck) {
+    $currentPrincipal = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+    if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+
+        Write-Host 'Session is not elevated — relaunching as Administrator...' -ForegroundColor Yellow
+
+        # Rebuild the caller's arguments so the elevated instance receives identical inputs.
+        $argParts = [System.Collections.Generic.List[string]]::new()
+        $argParts.AddRange([string[]]@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`""))
+
+        foreach ($key in $PSBoundParameters.Keys) {
+            $val = $PSBoundParameters[$key]
+            if ($val -is [System.Management.Automation.PSCredential]) {
+                Write-Warning "-Credential cannot be forwarded to the elevated session and will be omitted."
+            }
+            elseif ($val -is [switch]) {
+                if ($val.IsPresent) { $argParts.Add("-$key") }
+            }
+            else {
+                $argParts.Add("-$key")
+                $argParts.Add("`"$val`"")
+            }
+        }
+
+        # Use the exact executable that is running this script (handles both pwsh.exe and powershell.exe)
+        $psExe   = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        $elevated = Start-Process -FilePath $psExe -ArgumentList ($argParts -join ' ') `
+                                  -Verb RunAs -Wait -PassThru
+        exit $elevated.ExitCode
+    }
+}
+
+#endregion
 
 #region Helper Functions
 
