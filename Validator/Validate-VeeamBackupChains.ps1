@@ -6,7 +6,7 @@
 .DESCRIPTION
     This script enumerates Veeam backup datastores, discovers all backup jobs and their associated
     backup files, then validates each backup chain using the Veeam Backup Validator executable.
-    Generates comprehensive HTML reports with validation results.
+    Generates comprehensive HTML, CSV, and JSON reports with validation results.
 
 .PARAMETER DatastorePath
     Path to the Veeam backup datastore to scan. Can be local path or UNC path.
@@ -17,15 +17,30 @@
 .PARAMETER ReportPath
     Directory where HTML/XML validation reports will be saved.
 
+.PARAMETER Credential
+    PSCredential object for accessing UNC paths.
+
 .PARAMETER IncludeAllVMs
     If specified, validates all VMs in each backup. Otherwise validates backup integrity only.
+
+.PARAMETER ExportCsv
+    If specified, exports results to CSV.
+
+.PARAMETER ExportJson
+    If specified, exports results to JSON.
+
+.PARAMETER SendTeamsNotification
+    If specified, sends a summary to a Microsoft Teams Webhook.
+
+.PARAMETER TeamsWebhookUrl
+    The URL of the Microsoft Teams Incoming Webhook.
 
 .EXAMPLE
     .\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups" -ReportPath "C:\Reports"
 
 .NOTES
-    Author: PowerShell Validator Script
-    Version: 1.0
+    Author: PowerShell Validator Script (Refactored)
+    Version: 2.0
     Requires: Veeam Backup & Replication with Validator component installed
 #>
 
@@ -40,15 +55,44 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$ReportPath = "$env:USERPROFILE\Downloads\VeeamValidation",
     
+    [Parameter(Mandatory=$false)]
+    [System.Management.Automation.PSCredential]$Credential,
+    
+    [Parameter(Mandatory=$false)]
     [switch]$IncludeAllVMs,
     
-    [switch]$Silent
+    [switch]$Silent,
+    
+    [switch]$ExportCsv,
+    
+    [switch]$ExportJson,
+    
+    [switch]$SendTeamsNotification,
+    
+    [string]$TeamsWebhookUrl
 )
 
-# Global variables
-$script:ValidationResults = @()
-$script:LogFile = Join-Path $ReportPath "VeeamValidation_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
-$script:SummaryReport = Join-Path $ReportPath "ValidationSummary_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+# Strict Mode for better error checking
+Set-StrictMode -Version Latest
+Set-PSDebug -Trace 0
+
+# Global Configuration Object
+$Script:Config = @{
+    ValidatorPath = $ValidatorPath
+    ReportPath = $ReportPath
+    DatastorePath = $DatastorePath
+    IncludeAllVMs = $IncludeAllVMs
+    Silent = $Silent
+    Credential = $Credential
+    ExportCsv = $ExportCsv
+    ExportJson = $ExportJson
+    SendTeamsNotification = $SendTeamsNotification
+    TeamsWebhookUrl = $TeamsWebhookUrl
+}
+
+$Script:ValidationResults = @()
+$Script:LogFile    = $null  # Set by Initialize-Environment after report directory is confirmed to exist
+$Script:SummaryReport = $null  # Set by Initialize-Environment after report directory is confirmed to exist
 
 #region Helper Functions
 
@@ -62,8 +106,7 @@ function Write-Log {
     $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $logEntry = "$timestamp [$Level] $Message"
     
-    # Console output with colors
-    if (-not $Silent) {
+    if (-not $Script:Config.Silent) {
         switch ($Level) {
             'Error'   { Write-Host $logEntry -ForegroundColor Red }
             'Warning' { Write-Host $logEntry -ForegroundColor Yellow }
@@ -72,45 +115,50 @@ function Write-Log {
         }
     }
     
-    # File output
-    if ($script:LogFile) {
-        Add-Content -Path $script:LogFile -Value $logEntry -ErrorAction SilentlyContinue
+    if ($Script:LogFile) {
+        Add-Content -Path $Script:LogFile -Value $logEntry -ErrorAction SilentlyContinue
     }
 }
 
 function Test-ValidatorExecutable {
-    if (-not (Test-Path $ValidatorPath)) {
-        Write-Log "Veeam Backup Validator not found at: $ValidatorPath" -Level Error
-        Write-Log "Please ensure Veeam Backup & Replication is installed with the Validator component" -Level Error
-        return $false
-    }
-    
+    # 1. Check provided path
+    if (Test-Path $Script:Config.ValidatorPath) { return $true }
+
+    # 2. Check Registry for installation path
+    $regPath = "HKLM:\SOFTWARE\Veeam\Veeam Backup and Replication"
     try {
-        $versionOutput = & $ValidatorPath /? 2>&1 | Select-Object -First 2
-        Write-Log "Found Veeam Backup Validator: $($versionOutput -join ' ')" -Level Success
-        return $true
+        $installDir = (Get-ItemProperty -Path $regPath -ErrorAction Stop).InstallDir
+        $fallbackPath = Join-Path $installDir "Veeam.Backup.Validator.exe"
+        if (Test-Path $fallbackPath) {
+            Write-Log "Found Veeam Validator via Registry: $fallbackPath" -Level Success
+            $Script:Config.ValidatorPath = $fallbackPath
+            return $true
+        }
+    } catch {
+        Write-Log "Could not locate Veeam Registry key." -Level Warning
     }
-    catch {
-        Write-Log "Failed to execute Veeam Backup Validator: $_" -Level Error
-        return $false
-    }
+
+    Write-Log "Veeam Backup Validator not found at: $($Script:Config.ValidatorPath)" -Level Error
+    return $false
 }
 
 function Initialize-Environment {
-    # Create report directory if it doesn't exist
-    if (-not (Test-Path $ReportPath)) {
-        New-Item -Path $ReportPath -ItemType Directory -Force | Out-Null
-        Write-Log "Created report directory: $ReportPath" -Level Info
+    $dirCreated = $false
+    try {
+        if (-not (Test-Path $Script:Config.ReportPath)) {
+            New-Item -Path $Script:Config.ReportPath -ItemType Directory -Force -ErrorAction Stop | Out-Null
+            $dirCreated = $true
+        }
+    } catch {
+        throw "Failed to create report directory '$($Script:Config.ReportPath)': $($_.Exception.Message)"
     }
-    
-    # Initialize log file
-    if (-not (Test-Path (Split-Path $script:LogFile -Parent))) {
-        New-Item -Path (Split-Path $script:LogFile -Parent) -ItemType Directory -Force | Out-Null
-    }
-    
+
+    # Set log/report file paths only after the directory is guaranteed to exist
+    $Script:LogFile = Join-Path $Script:Config.ReportPath "VeeamValidation_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+    $Script:SummaryReport = Join-Path $Script:Config.ReportPath "ValidationSummary_$(Get-Date -Format 'yyyyMMdd_HHmmss').html"
+
+    if ($dirCreated) { Write-Log "Created report directory: $($Script:Config.ReportPath)" -Level Info }
     Write-Log "=== Veeam Backup Chain Validation Started ===" -Level Info
-    Write-Log "Datastore: $DatastorePath" -Level Info
-    Write-Log "Report Path: $ReportPath" -Level Info
 }
 
 #endregion
@@ -121,23 +169,30 @@ function Find-VeeamBackupJobs {
     param(
         [string]$Path
     )
-    
+
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path $Path -PathType Container)) {
+        Write-Log "Invalid or inaccessible path for backup discovery: '$Path'" -Level Error
+        return @{}
+    }
+
     Write-Log "Scanning for Veeam backup jobs in: $Path" -Level Info
     
     $backupJobs = @{}
+    $knownJobPaths = @()
     
-    # Find all VBM files (backup metadata)
-    $vbmFiles = Get-ChildItem -Path $Path -Recurse -Filter "*.vbm" -ErrorAction SilentlyContinue
+    # 1. Scan for VBM files (Metadata) - Single Pass with -File
+    $vbmFiles = Get-ChildItem -Path $Path -Recurse -File -Filter "*.vbm" -ErrorAction SilentlyContinue
     
     foreach ($vbm in $vbmFiles) {
-        $jobName = [System.IO.Path]::GetFileNameWithoutExtension($vbm.Name)
         $jobPath = $vbm.DirectoryName
+        $knownJobPaths += $jobPath
         
-        Write-Log "Found backup job: $jobName" -Level Info
+        # Extract Job Name from Directory or VBM Filename
+        $jobName = [System.IO.Path]::GetFileNameWithoutExtension($vbm.Name)
         
-        # Find associated backup files
-        $vbkFiles = Get-ChildItem -Path $jobPath -Filter "*.vbk" -ErrorAction SilentlyContinue
-        $vibFiles = Get-ChildItem -Path $jobPath -Filter "*.vib" -ErrorAction SilentlyContinue
+        # Find associated files in the same directory
+        $vbkFiles = Get-ChildItem -Path $jobPath -File -Filter "*.vbk" -ErrorAction SilentlyContinue
+        $vibFiles = Get-ChildItem -Path $jobPath -File -Filter "*.vib" -ErrorAction SilentlyContinue
         
         $backupJobs[$jobName] = @{
             Name = $jobName
@@ -149,37 +204,38 @@ function Find-VeeamBackupJobs {
             TotalSize = ($vbkFiles | Measure-Object -Property Length -Sum).Sum + 
                        ($vibFiles | Measure-Object -Property Length -Sum).Sum
         }
-        
-        Write-Log "  - Full backups: $($vbkFiles.Count)" -Level Info
-        Write-Log "  - Incremental backups: $($vibFiles.Count)" -Level Info
     }
     
-    # Also find orphaned backup files (without VBM)
-    $allVbkFiles = Get-ChildItem -Path $Path -Recurse -Filter "*.vbk" -ErrorAction SilentlyContinue
+    # 2. Scan for Orphaned Files (VBK/VIB without VBM)
+    # We scan for VBK files to establish the job identity, then check for VIBs
+    $allVbkFiles = Get-ChildItem -Path $Path -Recurse -File -Filter "*.vbk" -ErrorAction SilentlyContinue
     
     foreach ($vbk in $allVbkFiles) {
         $jobPath = $vbk.DirectoryName
-        $vbmInSameDir = Get-ChildItem -Path $jobPath -Filter "*.vbm" -ErrorAction SilentlyContinue
         
-        if (-not $vbmInSameDir) {
-            # Extract job name from file name pattern
-            $jobName = if ($vbk.Name -match '^(.+?)(?:D\d{4}-\d{2}-\d{2}T|\d{4}-\d{2}-\d{2}T|\.vbk)') {
-                $matches[1]
-            } else {
-                [System.IO.Path]::GetFileNameWithoutExtension($vbk.Name)
-            }
+        # If this path was already processed as a valid job, skip
+        if ($knownJobPaths -contains $jobPath) { continue }
+        
+        # Extract Job Name (Heuristic: Directory Name or Filename prefix)
+        $jobName = if ($vbk.Name -match '^(.+?)(?:D\d{4}-\d{2}-\d{2}T|\d{4}-\d{2}-\d{2}T|\.vbk)') {
+            $matches[1]
+        } else {
+            [System.IO.Path]::GetFileNameWithoutExtension($vbk.Name)
+        }
+        
+        # Avoid duplicates in orphan list
+        if (-not $backupJobs.ContainsKey("$jobName-Orphaned")) {
+            Write-Log "Found orphaned backup files for job: $jobName" -Level Warning
             
-            if (-not $backupJobs.ContainsKey("$jobName-Orphaned")) {
-                Write-Log "Found orphaned backup files for job: $jobName" -Level Warning
-                
-                $backupJobs["$jobName-Orphaned"] = @{
-                    Name = "$jobName-Orphaned"
-                    Path = $jobPath
-                    VBMFile = $null
-                    FullBackups = Get-ChildItem -Path $jobPath -Filter "$jobName*.vbk" -ErrorAction SilentlyContinue
-                    IncrementalBackups = Get-ChildItem -Path $jobPath -Filter "$jobName*.vib" -ErrorAction SilentlyContinue
-                    IsOrphaned = $true
-                }
+            $vibFiles = Get-ChildItem -Path $jobPath -File -Filter "$jobName*.vib" -ErrorAction SilentlyContinue
+            
+            $backupJobs["$jobName-Orphaned"] = @{
+                Name = "$jobName-Orphaned"
+                Path = $jobPath
+                VBMFile = $null
+                FullBackups = @($vbk) # The current file
+                IncrementalBackups = $vibFiles
+                IsOrphaned = $true
             }
         }
     }
@@ -224,14 +280,9 @@ function Get-BackupChainInfo {
             }
         }
         
-        # Determine chain type
-        if ($Job.VBMFile) {
-            $chainInfo.ChainType = "Standard"
-        } elseif ($Job.IsOrphaned) {
-            $chainInfo.ChainType = "Orphaned"
-        } else {
-            $chainInfo.ChainType = "Standalone"
-        }
+        if ($Job.VBMFile) { $chainInfo.ChainType = "Standard" }
+        elseif ($Job.IsOrphaned) { $chainInfo.ChainType = "Orphaned" }
+        else { $chainInfo.ChainType = "Standalone" }
     }
     
     return $chainInfo
@@ -256,30 +307,37 @@ function Invoke-VeeamValidator {
         Files = @()
         Errors = @()
         ReportPath = $null
+        Stdout = @()
+        Stderr = @()
     }
     
     Write-Log "Starting validation for job: $($Job.Name)" -Level Info
     
-    # Generate report filename
     $reportFileName = "$($Job.Name)_$(Get-Date -Format 'yyyyMMdd_HHmmss').$ReportFormat"
-    $reportFullPath = Join-Path $ReportPath $reportFileName
+    $reportFullPath = Join-Path $Script:Config.ReportPath $reportFileName
     
+    # Declare before try so the finally block can always reference them, even if try throws early
+    $tempStdout = $null
+    $tempStderr = $null
+
     try {
-        # Validate using VBM file if available
+        $tempStdout = [System.IO.Path]::GetTempFileName()
+        $tempStderr = [System.IO.Path]::GetTempFileName()
+
         if ($Job.VBMFile -and (Test-Path $Job.VBMFile)) {
-            Write-Log "Validating using VBM file: $($Job.VBMFile)" -Level Info
-            
             $arguments = @(
                 "/file:`"$($Job.VBMFile)`""
                 "/report:`"$reportFullPath`""
                 "/format:$ReportFormat"
             )
+            if (-not $Script:Config.IncludeAllVMs) { $arguments += "/silence" }
             
-            if (-not $IncludeAllVMs) {
-                $arguments += "/silence"
-            }
+            # Execute with redirection
+            $process = Start-Process -FilePath $Script:Config.ValidatorPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru `
+                       -RedirectStandardOutput $tempStdout -RedirectStandardError $tempStderr
             
-            $process = Start-Process -FilePath $ValidatorPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+            $validationResult.Stdout = Get-Content $tempStdout -ErrorAction SilentlyContinue
+            $validationResult.Stderr = Get-Content $tempStderr -ErrorAction SilentlyContinue
             
             if ($process.ExitCode -eq 0) {
                 $validationResult.ValidationStatus = "Success"
@@ -287,19 +345,17 @@ function Invoke-VeeamValidator {
             } else {
                 $validationResult.ValidationStatus = "Failed"
                 $validationResult.Errors += "Validator exit code: $($process.ExitCode)"
-                Write-Log "Validation failed for: $($Job.Name) (Exit code: $($process.ExitCode))" -Level Error
+                if ($validationResult.Stderr) { $validationResult.Errors += "Stderr: $($validationResult.Stderr -join ' ')" }
+                Write-Log "Validation failed for: $($Job.Name)" -Level Error
             }
-            
             $validationResult.ReportPath = $reportFullPath
         }
-        # Validate individual backup files if no VBM
         else {
+            # Validate individual files
             Write-Log "No VBM file found, validating individual backup files" -Level Warning
             
             foreach ($backup in $Job.FullBackups) {
-                Write-Log "  Validating: $($backup.Name)" -Level Info
-                
-                $fileReportPath = Join-Path $ReportPath "$([System.IO.Path]::GetFileNameWithoutExtension($backup.Name))_$(Get-Date -Format 'yyyyMMdd_HHmmss').$ReportFormat"
+                $fileReportPath = Join-Path $Script:Config.ReportPath "$([System.IO.Path]::GetFileNameWithoutExtension($backup.Name))_$(Get-Date -Format 'yyyyMMdd_HHmmss').$ReportFormat"
                 
                 $arguments = @(
                     "/file:`"$($backup.FullName)`""
@@ -308,7 +364,8 @@ function Invoke-VeeamValidator {
                     "/silence"
                 )
                 
-                $process = Start-Process -FilePath $ValidatorPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru
+                $process = Start-Process -FilePath $Script:Config.ValidatorPath -ArgumentList $arguments -NoNewWindow -Wait -PassThru `
+                           -RedirectStandardOutput $tempStdout -RedirectStandardError $tempStderr
                 
                 $fileResult = @{
                     FileName = $backup.Name
@@ -320,14 +377,10 @@ function Invoke-VeeamValidator {
                 $validationResult.Files += $fileResult
                 
                 if ($process.ExitCode -ne 0) {
-                    Write-Log "  Validation failed for file: $($backup.Name)" -Level Error
                     $validationResult.Errors += "File $($backup.Name) validation failed"
-                } else {
-                    Write-Log "  Validation successful for file: $($backup.Name)" -Level Success
                 }
             }
             
-            # Set overall status based on file validations
             $failedCount = ($validationResult.Files | Where-Object { $_.Status -eq "Invalid" }).Count
             if ($failedCount -eq 0 -and $validationResult.Files.Count -gt 0) {
                 $validationResult.ValidationStatus = "Success"
@@ -336,12 +389,19 @@ function Invoke-VeeamValidator {
             } else {
                 $validationResult.ValidationStatus = "Failed"
             }
+            # Point top-level ReportPath to the directory containing the per-file reports
+            $validationResult.ReportPath = $Script:Config.ReportPath
         }
     }
     catch {
         $validationResult.ValidationStatus = "Error"
         $validationResult.Errors += $_.Exception.Message
-        Write-Log "Exception during validation: $_" -Level Error
+        Write-Log "Exception during validation of '$($Job.Name)': $($_.Exception.Message)" -Level Error
+    }
+    finally {
+        # Guarded against $null in case temp file assignment was never reached
+        if ($tempStdout) { Remove-Item $tempStdout -ErrorAction SilentlyContinue }
+        if ($tempStderr) { Remove-Item $tempStderr -ErrorAction SilentlyContinue }
     }
     
     $validationResult.EndTime = Get-Date
@@ -361,15 +421,14 @@ function Test-AllBackupJobs {
     
     foreach ($jobName in $BackupJobs.Keys) {
         $jobCount++
+        Write-Progress -Activity "Validating Backups" -Status "Processing: $jobName" -PercentComplete (($jobCount / $totalJobs) * 100)
+        
         Write-Log "[$jobCount/$totalJobs] Processing job: $jobName" -Level Info
         
         $job = $BackupJobs[$jobName]
         $chainInfo = Get-BackupChainInfo -Job $job
-        
-        # Perform validation
         $validationResult = Invoke-VeeamValidator -Job $job -ReportFormat "html"
         
-        # Combine results
         $combinedResult = @{
             JobName = $jobName
             ChainInfo = $chainInfo
@@ -378,14 +437,10 @@ function Test-AllBackupJobs {
         }
         
         $allResults += $combinedResult
-        $script:ValidationResults += $combinedResult
-        
-        # Add delay between validations to avoid overload
-        if ($jobCount -lt $totalJobs) {
-            Start-Sleep -Seconds 2
-        }
+        $Script:ValidationResults += $combinedResult
     }
     
+    Write-Progress -Activity "Validating Backups" -Completed
     return $allResults
 }
 
@@ -394,19 +449,13 @@ function Test-AllBackupJobs {
 #region Reporting Functions
 
 function Format-FileSize {
-    param([int64]$Size)
-    
-    if ($Size -gt 1TB) {
-        return "{0:N2} TB" -f ($Size / 1TB)
-    } elseif ($Size -gt 1GB) {
-        return "{0:N2} GB" -f ($Size / 1GB)
-    } elseif ($Size -gt 1MB) {
-        return "{0:N2} MB" -f ($Size / 1MB)
-    } elseif ($Size -gt 1KB) {
-        return "{0:N2} KB" -f ($Size / 1KB)
-    } else {
-        return "$Size Bytes"
-    }
+    param([Nullable[int64]]$Size)
+    if (-not $Size -or $Size -le 0) { return 'N/A' }
+    if ($Size -gt 1TB)     { return "{0:N2} TB" -f ($Size / 1TB) }
+    elseif ($Size -gt 1GB) { return "{0:N2} GB" -f ($Size / 1GB) }
+    elseif ($Size -gt 1MB) { return "{0:N2} MB" -f ($Size / 1MB) }
+    elseif ($Size -gt 1KB) { return "{0:N2} KB" -f ($Size / 1KB) }
+    else                   { return "$Size Bytes" }
 }
 
 function New-ValidationSummaryReport {
@@ -416,6 +465,12 @@ function New-ValidationSummaryReport {
     
     Write-Log "Generating HTML summary report" -Level Info
     
+    $htmlSafe = {
+        param($val)
+        if ($null -eq $val) { return '' }
+        [string]$val -replace '&', '&amp;' -replace '<', '&lt;' -replace '>', '&gt;' -replace '"', '&quot;'
+    }
+
     $html = @"
 <!DOCTYPE html>
 <html>
@@ -423,131 +478,24 @@ function New-ValidationSummaryReport {
     <title>Veeam Backup Chain Validation Report</title>
     <meta charset="utf-8">
     <style>
-        body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            margin: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-        }
-        .container {
-            max-width: 1400px;
-            margin: 0 auto;
-            background: white;
-            border-radius: 10px;
-            padding: 30px;
-            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
-        }
-        h1 {
-            color: #333;
-            border-bottom: 3px solid #667eea;
-            padding-bottom: 10px;
-        }
-        h2 {
-            color: #555;
-            margin-top: 30px;
-        }
-        .summary-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-            gap: 20px;
-            margin: 20px 0;
-        }
-        .summary-card {
-            background: #f8f9fa;
-            padding: 20px;
-            border-radius: 8px;
-            text-align: center;
-            border-left: 4px solid #667eea;
-        }
-        .summary-card h3 {
-            margin: 0 0 10px 0;
-            color: #666;
-            font-size: 14px;
-            text-transform: uppercase;
-        }
-        .summary-card .value {
-            font-size: 32px;
-            font-weight: bold;
-            color: #333;
-        }
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 20px; background: #f4f6f9; }
+        .container { max-width: 1400px; margin: 0 auto; background: white; border-radius: 8px; padding: 30px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 3px solid #667eea; padding-bottom: 10px; }
+        .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 20px; margin: 20px 0; }
+        .summary-card { background: #f8f9fa; padding: 20px; border-radius: 8px; text-align: center; border-left: 4px solid #667eea; }
         .summary-card.success { border-left-color: #28a745; }
         .summary-card.warning { border-left-color: #ffc107; }
         .summary-card.error { border-left-color: #dc3545; }
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-        }
-        th {
-            background: #667eea;
-            color: white;
-            padding: 12px;
-            text-align: left;
-            font-weight: 600;
-        }
-        td {
-            padding: 10px 12px;
-            border-bottom: 1px solid #dee2e6;
-        }
-        tr:hover {
-            background: #f8f9fa;
-        }
-        .status-badge {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 20px;
-            font-size: 12px;
-            font-weight: bold;
-            text-transform: uppercase;
-        }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th { background: #667eea; color: white; padding: 12px; text-align: left; }
+        td { padding: 10px 12px; border-bottom: 1px solid #dee2e6; }
+        .status-badge { display: inline-block; padding: 4px 12px; border-radius: 20px; font-size: 12px; font-weight: bold; }
         .status-success { background: #d4edda; color: #155724; }
         .status-partial { background: #fff3cd; color: #856404; }
         .status-failed { background: #f8d7da; color: #721c24; }
         .status-error { background: #f8d7da; color: #721c24; }
-        .status-notrun { background: #e9ecef; color: #495057; }
-        .chain-type {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 11px;
-            font-weight: bold;
-        }
-        .chain-standard { background: #cfe2ff; color: #084298; }
-        .chain-orphaned { background: #fff3cd; color: #664d03; }
-        .chain-standalone { background: #e9ecef; color: #495057; }
-        .details-section {
-            margin-top: 40px;
-            padding: 20px;
-            background: #f8f9fa;
-            border-radius: 8px;
-        }
-        .file-list {
-            max-height: 300px;
-            overflow-y: auto;
-            border: 1px solid #dee2e6;
-            border-radius: 4px;
-            padding: 10px;
-            background: white;
-            margin-top: 10px;
-        }
-        .file-item {
-            padding: 5px 0;
-            border-bottom: 1px solid #f0f0f0;
-            font-family: monospace;
-            font-size: 12px;
-        }
-        .timestamp {
-            color: #6c757d;
-            font-size: 14px;
-            margin-top: 30px;
-            text-align: center;
-        }
-        .chart-container {
-            margin: 30px 0;
-            height: 300px;
-        }
+        .timestamp { color: #6c757d; font-size: 14px; margin-top: 30px; text-align: center; }
     </style>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 </head>
 <body>
     <div class="container">
@@ -573,7 +521,7 @@ function New-ValidationSummaryReport {
             </div>
         </div>
 
-        <h2>📊 Validation Results Summary</h2>
+        <h2>📊 Validation Results</h2>
         <table>
             <thead>
                 <tr>
@@ -581,8 +529,6 @@ function New-ValidationSummaryReport {
                     <th>Chain Type</th>
                     <th>Files</th>
                     <th>Total Size</th>
-                    <th>Oldest Backup</th>
-                    <th>Newest Backup</th>
                     <th>Validation Status</th>
                     <th>Duration</th>
                     <th>Report</th>
@@ -600,27 +546,19 @@ function New-ValidationSummaryReport {
             default { 'status-notrun' }
         }
         
-        $chainClass = switch ($result.ChainInfo.ChainType) {
-            'Standard' { 'chain-standard' }
-            'Orphaned' { 'chain-orphaned' }
-            default { 'chain-standalone' }
-        }
-        
         $reportLink = if ($result.ValidationResult.ReportPath -and (Test-Path $result.ValidationResult.ReportPath)) {
-            "<a href='file:///$($result.ValidationResult.ReportPath -replace '\\', '/')'>View Report</a>"
+            "<a href='file:///$($result.ValidationResult.ReportPath -replace '\\', '/')' target='_blank'>View</a>"
         } else {
             "N/A"
         }
         
         $html += @"
                 <tr>
-                    <td><strong>$($result.JobName)</strong></td>
-                    <td><span class="chain-type $chainClass">$($result.ChainInfo.ChainType)</span></td>
+                    <td><strong>$(& $htmlSafe $result.JobName)</strong></td>
+                    <td>$(& $htmlSafe $result.ChainInfo.ChainType)</td>
                     <td>$($result.ChainInfo.ChainLength)</td>
                     <td>$(Format-FileSize $result.ChainInfo.TotalSize)</td>
-                    <td>$(if ($result.ChainInfo.OldestBackup) { $result.ChainInfo.OldestBackup.ToString('yyyy-MM-dd') } else { 'N/A' })</td>
-                    <td>$(if ($result.ChainInfo.NewestBackup) { $result.ChainInfo.NewestBackup.ToString('yyyy-MM-dd') } else { 'N/A' })</td>
-                    <td><span class="status-badge $statusClass">$($result.ValidationResult.ValidationStatus)</span></td>
+                    <td><span class="status-badge $statusClass">$(& $htmlSafe $result.ValidationResult.ValidationStatus)</span></td>
                     <td>$([Math]::Round($result.ValidationResult.Duration, 1))s</td>
                     <td>$reportLink</td>
                 </tr>
@@ -630,197 +568,190 @@ function New-ValidationSummaryReport {
     $html += @"
             </tbody>
         </table>
-
-        <h2>📈 Statistics</h2>
-        <canvas id="validationChart"></canvas>
-
-        <div class="details-section">
-            <h2>📁 Datastore Information</h2>
-            <p><strong>Datastore Path:</strong> $DatastorePath</p>
-            <p><strong>Total Backup Jobs:</strong> $($Results.Count)</p>
-            <p><strong>Total Backup Files:</strong> $(($Results | ForEach-Object { $_.ChainInfo.ChainLength } | Measure-Object -Sum).Sum)</p>
-            <p><strong>Total Storage Used:</strong> $(Format-FileSize ($Results | ForEach-Object { $_.ChainInfo.TotalSize } | Measure-Object -Sum).Sum)</p>
-        </div>
-
-        <script>
-            const ctx = document.getElementById('validationChart').getContext('2d');
-            const statusCounts = {
-                'Success': $(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count),
-                'Partial Success': $(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'PartialSuccess' }).Count),
-                'Failed': $(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Failed' }).Count),
-                'Error': $(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Error' }).Count),
-                'Not Run': $(($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'NotRun' }).Count)
-            };
-
-            new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: Object.keys(statusCounts),
-                    datasets: [{
-                        data: Object.values(statusCounts),
-                        backgroundColor: [
-                            '#28a745',
-                            '#ffc107',
-                            '#dc3545',
-                            '#6c757d',
-                            '#e9ecef'
-                        ]
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'right'
-                        },
-                        title: {
-                            display: true,
-                            text: 'Validation Status Distribution'
-                        }
-                    }
-                }
-            });
-        </script>
     </div>
 </body>
 </html>
 "@
 
-    $html | Out-File -FilePath $script:SummaryReport -Encoding UTF8
-    Write-Log "HTML report saved to: $script:SummaryReport" -Level Success
+    try {
+        $html | Out-File -FilePath $Script:SummaryReport -Encoding UTF8 -ErrorAction Stop
+        Write-Log "HTML report saved to: $Script:SummaryReport" -Level Success
+    } catch {
+        Write-Log "Failed to save HTML summary report: $($_.Exception.Message)" -Level Error
+    }
+
+    # Export CSV — flatten nested hashtables so column values are meaningful, not type names
+    if ($Script:Config.ExportCsv) {
+        $csvPath = Join-Path $Script:Config.ReportPath "ValidationResults_$(Get-Date -Format 'yyyyMMdd_HHmmss').csv"
+        try {
+            $flatResults = $Script:ValidationResults | ForEach-Object {
+                [PSCustomObject]@{
+                    JobName          = $_.JobName
+                    Timestamp        = $_.Timestamp
+                    ChainType        = $_.ChainInfo.ChainType
+                    ChainLength      = $_.ChainInfo.ChainLength
+                    TotalSizeBytes   = $_.ChainInfo.TotalSize
+                    OldestBackup     = $_.ChainInfo.OldestBackup
+                    NewestBackup     = $_.ChainInfo.NewestBackup
+                    ValidationStatus = $_.ValidationResult.ValidationStatus
+                    DurationSeconds  = $_.ValidationResult.Duration
+                    Errors           = ($_.ValidationResult.Errors -join '; ')
+                    ReportPath       = $_.ValidationResult.ReportPath
+                }
+            }
+            $flatResults | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8 -ErrorAction Stop
+            Write-Log "CSV report saved to: $csvPath" -Level Success
+        } catch {
+            Write-Log "Failed to save CSV report: $($_.Exception.Message)" -Level Error
+        }
+    }
+
+    # Export JSON
+    if ($Script:Config.ExportJson) {
+        $jsonPath = Join-Path $Script:Config.ReportPath "ValidationResults_$(Get-Date -Format 'yyyyMMdd_HHmmss').json"
+        try {
+            $Script:ValidationResults | ConvertTo-Json -Depth 10 | Out-File -FilePath $jsonPath -Encoding UTF8 -ErrorAction Stop
+            Write-Log "JSON report saved to: $jsonPath" -Level Success
+        } catch {
+            Write-Log "Failed to save JSON report: $($_.Exception.Message)" -Level Error
+        }
+    }
+}
+
+function Send-TeamsNotification {
+    param(
+        [array]$Results,
+        [string]$WebhookUrl
+    )
+
+    if (-not $WebhookUrl) {
+        Write-Log "Teams Webhook URL not provided. Skipping notification." -Level Warning
+        return
+    }
+
+    if ($WebhookUrl -notmatch '^https?://') {
+        Write-Log "Teams Webhook URL is invalid (must start with http:// or https://): $WebhookUrl" -Level Warning
+        return
+    }
+
+    $successCount = ($Results | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count
+    $failedCount = ($Results | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count
+    
+    $color = if ($failedCount -gt 0) { "FF0000" } else { "008000" }
+    
+    $body = @{
+        text = "Veeam Validation Summary"
+        themeColor = $color
+        sections = @(
+            @{
+                activityTitle = "Validation Results"
+                activitySubtitle = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+                activityText = "Total Jobs: $($Results.Count)`nSuccess: $successCount`nFailed: $failedCount"
+                activityImage = "https://img.icons8.com/color/48/000000/backup.png"
+            }
+        )
+    } | ConvertTo-Json -Depth 3
+
+    try {
+        Invoke-RestMethod -Uri $WebhookUrl -Method Post -Body $body -ContentType 'application/json' -ErrorAction Stop
+        Write-Log "Teams notification sent." -Level Success
+    } catch {
+        Write-Log "Failed to send Teams notification: $($_.Exception.Message)" -Level Error
+    }
 }
 
 #endregion
 
 #region Main Execution
 
-function Show-InteractiveMenu {
-    Clear-Host
-    Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║         Veeam Backup Chain Validator - Main Menu            ║" -ForegroundColor Cyan
-    Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "1. Validate Local Datastore" -ForegroundColor White
-    Write-Host "2. Validate Network Datastore (UNC Path)" -ForegroundColor White
-    Write-Host "3. Validate Multiple Datastores" -ForegroundColor White
-    Write-Host "4. View Last Report" -ForegroundColor White
-    Write-Host "5. Settings" -ForegroundColor White
-    Write-Host "Q. Quit" -ForegroundColor White
-    Write-Host ""
-    Write-Host "Select an option: " -NoNewline -ForegroundColor Yellow
-}
-
 function Start-ValidationWorkflow {
-    # Initialize environment
-    Initialize-Environment
-    
-    # Verify Veeam Validator is available
-    if (-not (Test-ValidatorExecutable)) {
-        Write-Log "Cannot proceed without Veeam Backup Validator" -Level Error
-        return
-    }
-    
-    # If no datastore path provided, show interactive menu
-    if (-not $DatastorePath) {
-        Show-InteractiveMenu
-        $choice = Read-Host
-        
-        switch ($choice) {
-            '1' {
-                $DatastorePath = Read-Host "Enter local datastore path"
-            }
-            '2' {
-                $DatastorePath = Read-Host "Enter UNC path (\\server\share)"
-                $useCredentials = Read-Host "Use credentials? (Y/N)"
-                if ($useCredentials -eq 'Y') {
-                    $cred = Get-Credential -Message "Enter credentials for $DatastorePath"
-                    # Map network drive temporarily
-                    $null = New-PSDrive -Name "VeeamTemp" -PSProvider FileSystem -Root $DatastorePath -Credential $cred -ErrorAction Stop
-                    $DatastorePath = "VeeamTemp:\"
+    $mappedDrive = $null
+
+    try {
+        # 1. Initialize
+        Initialize-Environment
+
+        # 2. Check Validator
+        if (-not (Test-ValidatorExecutable)) {
+            Write-Log "Cannot proceed without Veeam Backup Validator" -Level Error
+            return 1
+        }
+
+        # 3. Handle UNC Paths & Credentials
+        if ($Script:Config.DatastorePath -match '^\\\\') {
+            try {
+                $driveLetter = "VeeamNet"
+                $driveParams = @{
+                    Name        = $driveLetter
+                    PSProvider  = 'FileSystem'
+                    Root        = $Script:Config.DatastorePath
+                    ErrorAction = 'Stop'
                 }
+                # Only supply -Credential when one was provided; passing $null causes errors on some systems
+                if ($Script:Config.Credential) { $driveParams.Credential = $Script:Config.Credential }
+                $null = New-PSDrive @driveParams
+                $Script:Config.DatastorePath = "${driveLetter}:\"
+                $mappedDrive = $driveLetter
+                Write-Log "Mapped UNC path to: $Script:Config.DatastorePath" -Level Info
             }
-            '3' {
-                Write-Host "Enter datastore paths (one per line, empty line to finish):" -ForegroundColor Yellow
-                $paths = @()
-                while ($true) {
-                    $path = Read-Host
-                    if ([string]::IsNullOrWhiteSpace($path)) { break }
-                    $paths += $path
-                }
-                
-                foreach ($path in $paths) {
-                    Write-Host "`nProcessing datastore: $path" -ForegroundColor Cyan
-                    $script:DatastorePath = $path
-                    Start-ValidationWorkflow
-                }
-                return
-            }
-            '4' {
-                if (Test-Path $script:SummaryReport) {
-                    Start-Process $script:SummaryReport
-                } else {
-                    Write-Host "No report found" -ForegroundColor Yellow
-                }
-                return
-            }
-            'Q' {
-                Write-Host "Exiting..." -ForegroundColor Yellow
-                return
-            }
-            default {
-                Write-Host "Invalid selection" -ForegroundColor Red
-                return
+            catch {
+                Write-Log "Failed to map network drive: $($_.Exception.Message)" -Level Error
+                return 1
             }
         }
+        elseif (-not $Script:Config.DatastorePath) {
+            $Script:Config.DatastorePath = Read-Host "Enter Datastore Path"
+        }
+
+        # 4. Validate Path Exists
+        if (-not (Test-Path $Script:Config.DatastorePath)) {
+            Write-Log "Datastore path not found: $($Script:Config.DatastorePath)" -Level Error
+            return 1
+        }
+
+        # 5. Discovery
+        Write-Log "Starting backup discovery..." -Level Info
+        $backupJobs = Find-VeeamBackupJobs -Path $Script:Config.DatastorePath
+
+        if ($backupJobs.Count -eq 0) {
+            Write-Log "No Veeam backup jobs found in: $($Script:Config.DatastorePath)" -Level Warning
+            return 2
+        }
+
+        # 6. Validation
+        Write-Log "Starting validation of $($backupJobs.Count) backup jobs..." -Level Info
+        $validationResults = Test-AllBackupJobs -BackupJobs $backupJobs
+
+        # 7. Reporting
+        New-ValidationSummaryReport -Results $validationResults
+
+        # 8. Notification
+        if ($Script:Config.SendTeamsNotification) {
+            Send-TeamsNotification -Results $validationResults -WebhookUrl $Script:Config.TeamsWebhookUrl
+        }
+
+        # Exit code: 0 = all passed, 3 = one or more validation failures
+        $failedCount = ($validationResults | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count
+        $exitCode = if ($failedCount -gt 0) { 3 } else { 0 }
+        Write-Log "Validation complete. $($validationResults.Count) jobs processed, $failedCount failed." -Level Success
+        return $exitCode
     }
-    
-    # Validate datastore path exists
-    if (-not (Test-Path $DatastorePath)) {
-        Write-Log "Datastore path not found: $DatastorePath" -Level Error
-        return
+    catch {
+        Write-Log "Unhandled error in validation workflow: $($_.Exception.Message)" -Level Error
+        return 1
     }
-    
-    # Discover backup jobs
-    Write-Log "=" * 60 -Level Info
-    Write-Log "Starting backup discovery..." -Level Info
-    $backupJobs = Find-VeeamBackupJobs -Path $DatastorePath
-    
-    if ($backupJobs.Count -eq 0) {
-        Write-Log "No Veeam backup jobs found in: $DatastorePath" -Level Warning
-        return
-    }
-    
-    # Validate all backup jobs
-    Write-Log "=" * 60 -Level Info
-    Write-Log "Starting validation of $($backupJobs.Count) backup jobs..." -Level Info
-    $validationResults = Test-AllBackupJobs -BackupJobs $backupJobs
-    
-    # Generate summary report
-    New-ValidationSummaryReport -Results $validationResults
-    
-    # Display summary
-    Write-Log "=" * 60 -Level Info
-    Write-Log "Validation Summary:" -Level Info
-    Write-Log "  Total Jobs: $($validationResults.Count)" -Level Info
-    Write-Log "  Successful: $(($validationResults | Where-Object { $_.ValidationResult.ValidationStatus -eq 'Success' }).Count)" -Level Success
-    Write-Log "  Partial Success: $(($validationResults | Where-Object { $_.ValidationResult.ValidationStatus -eq 'PartialSuccess' }).Count)" -Level Warning
-    Write-Log "  Failed: $(($validationResults | Where-Object { $_.ValidationResult.ValidationStatus -in @('Failed', 'Error') }).Count)" -Level Error
-    Write-Log "=" * 60 -Level Info
-    
-    # Open report if not in silent mode
-    if (-not $Silent) {
-        Write-Host "`nWould you like to open the summary report? (Y/N): " -NoNewline -ForegroundColor Yellow
-        $openReport = Read-Host
-        if ($openReport -eq 'Y') {
-            Start-Process $script:SummaryReport
+    finally {
+        # 9. Cleanup — always runs, even on early return or unhandled exception
+        if ($mappedDrive) {
+            Remove-PSDrive -Name $mappedDrive -Force -ErrorAction SilentlyContinue
+            Write-Log "Removed temporary network drive." -Level Info
         }
     }
-    
-    Write-Log "Validation complete. Reports saved to: $ReportPath" -Level Success
 }
 
-# Main entry point
-Start-ValidationWorkflow
-
-#endregion
+# Entry Point — exit code conventions:
+#   0 = success, all backups valid
+#   1 = script/configuration error
+#   2 = no backup jobs found
+#   3 = one or more backup validation failures
+exit (Start-ValidationWorkflow)
