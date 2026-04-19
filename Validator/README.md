@@ -1,4 +1,4 @@
-# Validate-VeeamBackupChains
+# Validate.PS1 (Veeam Backup Chain Validator)
 
 A PowerShell script that discovers and validates Veeam backup chains in a datastore using the
 official `Veeam.Backup.Validator.exe` and produces HTML, CSV, and JSON reports.
@@ -13,23 +13,26 @@ official `Veeam.Backup.Validator.exe` and produces HTML, CSV, and JSON reports.
 
 ```powershell
 # Basic — validate a local datastore
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups"
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups"
 
 # Custom report output directory
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups" -ReportPath "C:\Reports"
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups" -ReportPath "C:\Reports"
 
 # UNC path with stored credentials
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "\\server\backups" -Credential (Get-Credential)
+.\Validate.PS1 -DatastorePath "\\server\backups" -Credential (Get-Credential)
 
 # Export CSV and JSON alongside the HTML report
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups" -ExportCsv -ExportJson
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups" -ExportCsv -ExportJson
 
 # Send a Teams summary on completion
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups" `
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups" `
     -SendTeamsNotification -TeamsWebhookUrl "https://outlook.office.com/webhook/..."
 
 # Silent (no console output — log file only)
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups" -Silent
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups" -Silent
+
+# Unattended run — no UAC prompt, no browser pop-up
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups" -SkipElevationCheck -NoOpenReport
 ```
 
 ## Parameters
@@ -46,6 +49,28 @@ official `Veeam.Backup.Validator.exe` and produces HTML, CSV, and JSON reports.
 | `ExportJson` | Switch | — | Also write a JSON file of results |
 | `SendTeamsNotification` | Switch | — | POST a summary to a Teams Incoming Webhook |
 | `TeamsWebhookUrl` | String | — | The Teams Incoming Webhook URL |
+| `SkipElevationCheck` | Switch | — | Suppress the automatic UAC re-launch when the session is not elevated (scheduled tasks, CI, SYSTEM context) |
+| `NoOpenReport` | Switch | — | Do NOT auto-open the HTML report in the default browser (unattended runs) |
+
+## Self-Elevation
+
+When launched in a non-elevated session the script automatically re-launches itself
+via UAC, preserving all original parameters. The re-launched elevated process's
+exit code is returned to the caller — automation wrappers see the same code they'd
+see from a directly-elevated run. Pass `-SkipElevationCheck` to suppress this.
+
+## Chain Integrity Cross-Check
+
+Before (and independent of) the Veeam validator, the script parses each job's VBM
+manifest and cross-references it with the files actually on disk. This catches
+chain damage that the Veeam validator can silently skip:
+
+- **Missing from disk** (referenced by VBM, not present) — marks the job as Failed.
+- **Possible Orphaned Files** (on disk, not referenced by VBM) — reported in a
+  separate amber panel and shown in their own row in the chain visualization.
+
+Folders containing a VBM but no `.vbk`/`.vib`/`.vrb` payload are silently skipped
+(nothing meaningful to validate).
 
 ## Output Files
 
@@ -72,7 +97,7 @@ scheduled tasks, CI pipelines, and monitoring wrappers.
 | `3` | One or more backup jobs failed validation |
 
 ```powershell
-.\Validate-VeeamBackupChains.ps1 -DatastorePath "D:\VeeamBackups"
+.\Validate.PS1 -DatastorePath "D:\VeeamBackups"
 if ($LASTEXITCODE -eq 3) { Send-Alert "Backup validation failures detected" }
 ```
 
@@ -119,7 +144,7 @@ before attempting the request, and reports a clear warning rather than a confusi
 
 ## Testing
 
-`Test-ErrorHandling.ps1` in the same directory runs 6 automated tests against the main
+`Test-ErrorHandling.ps1` in the same directory runs 8 automated tests against the main
 script using child `pwsh` processes — no Veeam installation required.
 
 ```powershell
@@ -134,9 +159,11 @@ Expected output:
   [PASS] T3: No backup jobs found (empty datastore)
   [PASS] T4: New report dir auto-created, log file written
   [PASS] T5: Empty DatastorePath rejected by path guard
+  [PASS] T7: .vbm with no backup payload is skipped (exit 2)
+  [PASS] T8: Broken chain detected via VBM/disk cross-check
   [PASS] T6: StrictMode startup check
 
-  Results: 6/6 passed
+  Results: 8/8 passed
 ```
 
 The tests cover:
@@ -145,3 +172,5 @@ The tests cover:
 - Log message pattern matching
 - Deferred `$Script:LogFile` initialisation (T4)
 - Absence of `Set-StrictMode` startup crashes (T6)
+- Folders with a VBM but no backup payload are skipped (T7)
+- Chain integrity cross-check detects missing + orphaned files (T8)

@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Tests error-handling scenarios in Validate-VeeamBackupChains.ps1 without a Veeam installation.
+    Tests error-handling scenarios in Validate.PS1 without a Veeam installation.
 
 .DESCRIPTION
     Each test invokes the script in a child pwsh process, captures stdout/stderr and any
@@ -19,7 +19,7 @@ param()
 
 Set-StrictMode -Version Latest
 
-$ScriptUnderTest = Join-Path $PSScriptRoot 'Validate-VeeamBackupChains.ps1'
+$ScriptUnderTest = Join-Path $PSScriptRoot 'Validate.PS1'
 $TempBase        = Join-Path $env:TEMP "VeeamErrTest_$(Get-Date -Format 'yyyyMMddHHmmss')"
 # notepad.exe exists on every Windows system; passes the file-existence check in Test-ValidatorExecutable
 $FakeValidatorExe = "$env:SystemRoot\System32\notepad.exe"
@@ -101,7 +101,7 @@ function Invoke-ScriptTest {
 
 Write-Host ''
 Write-Host '════════════════════════════════════════════════' -ForegroundColor Cyan
-Write-Host '  Validate-VeeamBackupChains — Error Handling   ' -ForegroundColor Cyan
+Write-Host '  Validate.PS1 — Error Handling                 ' -ForegroundColor Cyan
 Write-Host '════════════════════════════════════════════════' -ForegroundColor Cyan
 Write-Host ''
 
@@ -113,6 +113,7 @@ Invoke-ScriptTest -Name 'T1: Validator executable not found' `
         DatastorePath        = $EmptyDatastore
         ReportPath           = (Join-Path $TempBase 'rpt_t1')
         SkipElevationCheck   = $true
+        NoOpenReport         = $true
     } `
     -ExpectedExit 1 `
     -LogPattern   'Cannot proceed|not found'
@@ -125,6 +126,7 @@ Invoke-ScriptTest -Name 'T2: Datastore path does not exist' `
         DatastorePath        = "C:\NoSuchDatastore_$(Get-Random)"
         ReportPath           = (Join-Path $TempBase 'rpt_t2')
         SkipElevationCheck   = $true
+        NoOpenReport         = $true
     } `
     -ExpectedExit 1 `
     -LogPattern   'Datastore path not found'
@@ -136,6 +138,7 @@ Invoke-ScriptTest -Name 'T3: No backup jobs found (empty datastore)' `
         DatastorePath        = $EmptyDatastore
         ReportPath           = (Join-Path $TempBase 'rpt_t3')
         SkipElevationCheck   = $true
+        NoOpenReport         = $true
     } `
     -ExpectedExit 2 `
     -LogPattern   'No Veeam backup jobs'
@@ -150,6 +153,7 @@ Invoke-ScriptTest -Name 'T4: New report dir auto-created, log file written' `
         DatastorePath        = $EmptyDatastore
         ReportPath           = $freshReportDir
         SkipElevationCheck   = $true
+        NoOpenReport         = $true
     } `
     -ExpectedExit 2 `
     -LogPattern   'Veeam Backup Chain Validation Started'
@@ -163,35 +167,68 @@ Invoke-ScriptTest -Name 'T5: Empty DatastorePath rejected by path guard' `
         DatastorePath        = ' '    # single space → IsNullOrWhiteSpace guard fires
         ReportPath           = (Join-Path $TempBase 'rpt_t5')
         SkipElevationCheck   = $true
+        NoOpenReport         = $true
     } `
     -ExpectedExit 1 `
     -LogPattern   'not found|Invalid|inaccessible'
 
-# T7 ── Datastore contains a .vbm file but no .vbk/.vib files
-#        Get-ChildItem returns $null (not @()) for empty results; previously caused
-#        "The property 'Count' cannot be found" under Set-StrictMode -Version Latest
-#        Uses a .cmd stub as the validator so the process exits immediately (notepad hangs).
+# T7 ── Datastore contains a .vbm file but no .vbk/.vib files.
+#        Under the current policy, a folder with a VBM but no backup payload is SKIPPED,
+#        so the overall run reports 'No Veeam backup jobs' and exits with code 2.
+#        This also verifies the regression fix for the StrictMode .Count bug — the loop
+#        must safely handle $null-returning Get-ChildItem results without throwing.
 $datastoreWithVbm = Join-Path $TempBase 'DatastoreWithVbm'
 New-Item $datastoreWithVbm -ItemType Directory -Force | Out-Null
 New-Item (Join-Path $datastoreWithVbm 'BackupJob.vbm') -ItemType File -Force | Out-Null  # no .vbk or .vib
 
-# where.exe: always present on Windows, exits immediately with code 1 when given
-# unrecognised arguments — safe for -NoNewWindow -RedirectStandardOutput, no GUI.
-# Expected exit 3: script reaches Validation complete (bug fix confirmed) but
-# where.exe returns non-zero, so the job is counted as a validation failure.
-# WITHOUT the @() fix, Get-ChildItem returns $null and $null.Count throws under
-# StrictMode, the outer catch fires, and the script exits 1 instead.
+# where.exe: always present on Windows; referenced by T8 as a zero-arg-runnable validator stub.
 $whereExe = Join-Path $env:SystemRoot 'System32\where.exe'
 
-Invoke-ScriptTest -Name 'T7: .vbm present but no .vbk/.vib (StrictMode .Count regression)' `
+Invoke-ScriptTest -Name 'T7: .vbm with no backup payload is skipped (exit 2)' `
     -Params @{
         ValidatorPath        = $whereExe
         DatastorePath        = $datastoreWithVbm
         ReportPath           = (Join-Path $TempBase 'rpt_t7')
         SkipElevationCheck   = $true
+        NoOpenReport         = $true
+    } `
+    -ExpectedExit 2 `
+    -LogPattern   'Skipping folder with VBM but no backup files|No Veeam backup jobs'
+
+# T8 ── Broken chain: VBM references files that exist and files that do NOT exist on disk.
+#        This simulates the real-world scenario where a .vib file gets renamed (e.g. _MOD suffix)
+#        after the VBM was written. Veeam validator may still exit 0, so the chain integrity
+#        cross-check must catch both missing and extra/renamed files and mark the job Failed.
+$brokenDir = Join-Path $TempBase 'BrokenChain'
+New-Item $brokenDir -ItemType Directory -Force | Out-Null
+
+# Write a minimal VBM that references two .vib files — one exists on disk, one does not
+@'
+<?xml version="1.0"?>
+<BackupMetadata>
+  <Files>
+    <File>DC01_full.vbk</File>
+    <File>DC01_incr_001.vib</File>
+    <File>DC01_incr_002.vib</File>   <!-- referenced but MISSING on disk -->
+  </Files>
+</BackupMetadata>
+'@ | Set-Content (Join-Path $brokenDir 'Job.vbm')
+
+# Files on disk: the full, one referenced incremental, and one _MOD extra that the VBM does NOT reference
+New-Item (Join-Path $brokenDir 'DC01_full.vbk')              -ItemType File -Force | Out-Null
+New-Item (Join-Path $brokenDir 'DC01_incr_001.vib')          -ItemType File -Force | Out-Null
+New-Item (Join-Path $brokenDir 'DC01_incr_002_MOD.vib')      -ItemType File -Force | Out-Null
+
+Invoke-ScriptTest -Name 'T8: Broken chain detected via VBM/disk cross-check' `
+    -Params @{
+        ValidatorPath        = $whereExe     # exits non-zero but we match on Missing/Extra messages
+        DatastorePath        = $brokenDir
+        ReportPath           = (Join-Path $TempBase 'rpt_t8')
+        SkipElevationCheck   = $true
+        NoOpenReport         = $true
     } `
     -ExpectedExit 3 `
-    -LogPattern   'Validation complete'
+    -LogPattern   'missing on disk.*DC01_incr_002\.vib|renamed.*DC01_incr_002_MOD\.vib'
 
 # T6 ── Verify log is absent / $Script:LogFile=$null before Initialize-Environment,
 #        meaning no crash under Set-StrictMode -Version Latest at startup.
@@ -200,7 +237,7 @@ Write-Host ''
 Write-Host '  [INFO] T6: StrictMode startup check (no $Script:ReportPath crash)' -ForegroundColor Cyan
 $outT6  = Join-Path $TempBase 'stdout_T6.txt'
 $errT6  = Join-Path $TempBase 'stderr_T6.txt'
-$argsT6 = "-NoProfile -NonInteractive -File `"$ScriptUnderTest`" -ValidatorPath `"C:\Fake.exe`" -DatastorePath `"$EmptyDatastore`" -ReportPath `"$(Join-Path $TempBase 'rpt_t6')`" -SkipElevationCheck"
+$argsT6 = "-NoProfile -NonInteractive -File `"$ScriptUnderTest`" -ValidatorPath `"C:\Fake.exe`" -DatastorePath `"$EmptyDatastore`" -ReportPath `"$(Join-Path $TempBase 'rpt_t6')`" -SkipElevationCheck -NoOpenReport"
 $procT6 = Start-Process pwsh -ArgumentList $argsT6 -NoNewWindow -Wait -PassThru `
               -RedirectStandardOutput $outT6 -RedirectStandardError $errT6
 $stderrT6 = Get-Content $errT6 -Raw -ErrorAction SilentlyContinue
