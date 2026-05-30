@@ -98,6 +98,17 @@ Runs against the local machine without remoting — useful for validation.
 .\Get-LogonSessionReport.ps1 -ClearCredential
 ```
 
+### 9. Workgroup / TrustedHosts (When "Access is denied")
+
+If targets are not in the same domain or you see **WinRM client cannot process the request… add to TrustedHosts**:
+
+- Use **`-PromptOnConnectionFailure`** to be prompted for each failed machine. If you choose Y, the script tries to add it to TrustedHosts.
+- If you get **"Access is denied"** (no admin rights to change TrustedHosts), the script will then prompt: **"Open an elevated (Administrator) window to add them to TrustedHosts now? (Y/n)"**. Choose **Y** to open an elevated PowerShell that updates TrustedHosts; approve the UAC prompt, then **re-run the report script**.
+- Alternatively run the report script **as Administrator** so the first add succeeds, or add hosts manually in an elevated window:
+  ```powershell
+  Set-Item WSMan:\localhost\Client\TrustedHosts -Value 'DC01,DC02,W2025' -Force
+  ```
+
 ## Parameters
 
 | Parameter | Type | Default | Description |
@@ -117,6 +128,9 @@ Runs against the local machine without remoting — useful for validation.
 | `-TestMode` | switch | — | Query localhost without remoting |
 | `-ExportJson` | switch | — | Also emit `.json` output |
 | `-ExportCsv` | switch | — | Also emit `.csv` output |
+| `-OpenReport` | switch | `$true` | Open the HTML report in the default browser after generation |
+| `-AddToTrustedHostsOnFailure` | switch | — | On WinRM/TrustedHosts failure, add the machine to TrustedHosts and retry (requires admin to modify TrustedHosts) |
+| `-PromptOnConnectionFailure` | switch | — | On WinRM/TrustedHosts failure, prompt to add the machine to TrustedHosts and retry; if Access denied, prompt to open elevated window to fix |
 | `-Verbose` | switch | — | Detailed progress output |
 
 ## Event Coverage
