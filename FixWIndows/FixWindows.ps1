@@ -1,1565 +1,1100 @@
-## Script Created by David Andrews (C) 2022 All Rights Reserved
-## Last Update Jan 25, 2025 
-## This is my Windows Maintenance Script that performs the following functions
-## Copies down DISM ISO Image to check Windows System Files Integrity to Local C: Drive
-## Performs DISM  Analysis and Repairs any Files Straying from Baseline ISO
-## Performs Full Checkdisk with Repair on Drives C: and (A:-Z: if existent)
-## Performs Windows Updates
-## Performs Disk Cleanup
-## Performs Log Cleanup of All System Logs
-## Automatic Restart of System
-[CmdletBinding(
-    SupportsShouldProcess = $true,    # Enables -WhatIf and -Confirm parameters
-    DefaultParameterSetName = "Default",
-    HelpUri = "https://github.com/DavidDAndrews/FixWindows",
-    ConfirmImpact = "High"            # High impact operations require confirmation
-)]
-param(
-    [Parameter(
-        ParameterSetName = "Default",
-        HelpMessage = "Number of days before files are deleted"
-    )]
-    [int]$DaysToDelete = 1,
-    
-    [Parameter(
-        ParameterSetName = "Default",
-        HelpMessage = "Number of days before unused profiles are deleted"
-    )]
-    [int]$ProfileAge = 30,
-    
-    [Parameter(
-        ParameterSetName = "Default",
-        HelpMessage = "Skip Windows Update check/install"
-    )]
-    [switch]$SkipWindowsUpdate,
-    
-    [Parameter(
-        ParameterSetName = "Default",
-        HelpMessage = "Skip system restart"
-    )]
-    [switch]$NoRestart,
-    
-    [Parameter(
-        ParameterSetName = "Default",
-        HelpMessage = "Path to ISO source folder"
-    )]
-    [string]$ISOSourcePath = "\\192.168.111.10\nas-data\ISO\WINDOWS"
-)
-
-#region CONFIGURABLE VARIABLES - MODIFY THESE FOR YOUR ENVIRONMENT
-# ============================================================================
-# NETWORK PATHS AND ISO CONFIGURATIONS
-# ============================================================================
-
-
-# ISO file names for different Windows versions
-$ISO_FILES = @{
-    'WIN11'      = "W11PRO-24H2.ISO"    # Windows 11 Pro ISO
-    'WIN11_ARM64' = "W11Pro-ARM64.iso" # Windows 11 Pro ARM64 ISO
-    'WIN10'      = "W10PRO-1809.ISO"    # Windows 10 Pro ISO
-    'SVR2025'    = "W2025.ISO"          # Windows Server 2025 ISO
-    'SVR2022'    = "W2022.ISO"          # Windows Server 2022 ISO
-    'SVR2019'    = "W2019-1809.ISO"     # Windows Server 2019 ISO
-    'SVR2016'    = "W2016-1607.ISO"     # Windows Server 2016 ISO
-    'SVR2012R2'  = "W2012R2-1207.ISO"   # Windows Server 2012 R2 ISO
-}
-
-# ============================================================================
-# SCRIPT BEHAVIOR CONFIGURATIONS
-# ============================================================================
-
-# Error handling preferences
-$ErrorActionPreference = "Stop"              # Stop on errors by default
-$VerbosePreference = "Continue"             # Show verbose output
-
-
-#endregion CONFIGURABLE VARIABLES
-
-<#
-.NOTES
-    CONFIGURATION INSTRUCTIONS:
-    
-    1. ISO_SOURCE_PATH: 
-       - Set this to your network share or local path containing Windows ISO files
-       - Example: "\\server\share\ISO" or "D:\ISO"
-    
-    2. ISO_FILES:
-       - Update the ISO filenames to match your environment
-       - Ensure the ISO names exactly match your available files
-    
-    3. MAINTENANCE CONFIGURATIONS:
-       - Adjust DaysToDelete and ProfileAge parameters as needed
-       - All values are in days
-#>
-
-# Function definitions must come before they are used
-function Write-BoxedText {
-    param (
-        [string]$Title,
-        [string[]]$Messages,
-        [string]$ForegroundColor = 'White'
-    )
-    
-    # Get the longest message length for box width
-    $maxLength = ($Messages | Measure-Object -Property Length -Maximum).Maximum
-    $maxLength = [Math]::Max($maxLength, $Title.Length)
-    
-    # Simple box-drawing characters that are more compatible
-    $topLeft = [char]0x250C     # ┌
-    $topRight = [char]0x2510    # ┐
-    $bottomLeft = [char]0x2514  # └
-    $bottomRight = [char]0x2518 # ┘
-    $horizontal = [char]0x2500  # ─
-    $vertical = [char]0x2502    # │
-    $leftT = [char]0x251C      # ├
-    $rightT = [char]0x2524     # ┤
-    
-    # Create horizontal line
-    $horizontalLine = $horizontal.ToString() * ($maxLength + 2)
-    
-    # Get console width and calculate padding for centering
-    $consoleWidth = $Host.UI.RawUI.WindowSize.Width
-    $boxWidth = $maxLength + 4  # Total width of box including borders and padding
-    $leftPadding = " " * [Math]::Max(0, [Math]::Floor(($consoleWidth - $boxWidth) / 2))
-    
-    # Output the box
-    Write-Host ($leftPadding + $topLeft + $horizontalLine + $topRight) -ForegroundColor $ForegroundColor
-    
-    if ($Title) {
-        Write-Host ($leftPadding + $vertical + " " + $Title.PadRight($maxLength) + " " + $vertical) -ForegroundColor $ForegroundColor
-        Write-Host ($leftPadding + $leftT + $horizontalLine + $rightT) -ForegroundColor $ForegroundColor
-    }
-    
-    foreach ($msg in $Messages) {
-        Write-Host ($leftPadding + $vertical + " " + $msg.PadRight($maxLength) + " " + $vertical) -ForegroundColor $ForegroundColor
-    }
-    
-    Write-Host ($leftPadding + $bottomLeft + $horizontalLine + $bottomRight) -ForegroundColor $ForegroundColor
-}
-
-Clear-Host
-
-$OSVersion = Get-CimInstance Win32_OperatingSystem
-$BuildNumber = $OSVersion.BuildNumber
-# Helper functions for different message types
-function Write-WarningBox {
-    param([string]$Message)
-    Write-BoxedText -Title "! WARNING" -Messages @($Message) -ForegroundColor Yellow
-}
-
-function Write-ErrorBox {
-    param([string]$Message)
-    Write-BoxedText -Title "X ERROR" -Messages @($Message) -ForegroundColor Red
-}
-
-function Write-SuccessBox {
-    param([string]$Message)
-    Write-BoxedText -Title "√ SUCCESS" -Messages @($Message) -ForegroundColor Green
-}
-
-
-# Self-elevate the script to run with admin privileges
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "Attempting to run script as administrator..." -ForegroundColor Yellow
-    Start-Process powershell -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" $($args -join ' ')" -Verb RunAs
-    Exit
-}
-
-## Automatically detect Windows version and set $MyWinVer
-$OSInfo = Get-WmiObject Win32_OperatingSystem
-$OSVersion = [System.Environment]::OSVersion.Version
-$OSProductType = $OSInfo.ProductType # 1 = Workstation, 2 = Domain Controller, 3 = Server
-$OSCaption = $OSInfo.Caption
-$OSArchitecture = $OSInfo.OSArchitecture # Get system architecture (32-bit, 64-bit, ARM64)
-
-# Additional ARM64 detection methods
-$ProcessorArch = $env:PROCESSOR_ARCHITECTURE
-$ProcessorArchW6432 = $env:PROCESSOR_ARCHITEW6432
-$IsARM64 = $false
-
-# Check multiple methods for ARM64 detection
-if ($OSArchitecture -match "ARM64" -or $ProcessorArch -eq "ARM64" -or $ProcessorArchW6432 -eq "ARM64") {
-    $IsARM64 = $true
-}
-
-# Initialize variables
-$MyWinVer = $null
-$WimVal = "1" # Default value
-$ISO = $null
-
-# Determine OS Version and Type
-if ($OSProductType -eq 1) {
-    # Workstation (Windows 10/11)
-    if ($OSVersion.Major -eq 10) {
-        if ($OSVersion.Build -ge 22000) {
-            # Windows 11 - check for ARM64 architecture
-            if ($IsARM64) {
-                $MyWinVer = "WIN-11-ARM64"
-                $ISO = $ISO_FILES['WIN11_ARM64']
-                $detectedOS = "Windows 11 ARM64"
-            } else {
-                $MyWinVer = "WIN-11"
-                $ISO = $ISO_FILES['WIN11']
-                $detectedOS = "Windows 11"
-            }
-        } else {
-            $MyWinVer = "WIN-10"
-            $ISO = $ISO_FILES['WIN10']
-            $detectedOS = "Windows 10"
-        }
-    }
-} else {
-    # Server versions
-    if ($OSCaption -match "2016") {
-        if ($OSCaption -match "Server Core") {
-            $MyWinVer = "2016SC"
-            $ISO = $ISO_FILES['SVR2016']
-        } else {
-            $MyWinVer = "2016DE"
-            $WimVal = "2"
-            $ISO = $ISO_FILES['SVR2016']
-        }
-        $detectedOS = "Windows Server 2016"
-    }
-    elseif ($OSCaption -match "2019") {
-        if ($OSCaption -match "Server Core") {
-            $MyWinVer = "2019SC"
-            $ISO = $ISO_FILES['SVR2019']
-        } else {
-            $MyWinVer = "2019DE"
-            $WimVal = "2"
-            $ISO = $ISO_FILES['SVR2019']
-        }
-        $detectedOS = "Windows Server 2019"
-    }
-    elseif ($OSCaption -match "2022") {
-        if ($OSCaption -match "Server Core") {
-            $MyWinVer = "2022SC"
-            $ISO = $ISO_FILES['SVR2022']
-        } else {
-            $MyWinVer = "2022DE"
-            $WimVal = "2"
-            $ISO = $ISO_FILES['SVR2022']
-        }
-        $detectedOS = "Windows Server 2022"
-    }
-    elseif ($OSCaption -match "2025") {
-        if ($OSCaption -match "Server Core") {
-            $MyWinVer = "2025SC"
-            $ISO = $ISO_FILES['SVR2025']
-        } else {
-            $MyWinVer = "2025DE"
-            $WimVal = "2"
-            $ISO = $ISO_FILES['SVR2025']
-        }
-        $detectedOS = "Windows Server 2025"
-    }
-    elseif ($OSCaption -match "2012 R2") {
-        if ($OSCaption -match "Server Core") {
-            $MyWinVer = "2012R2SC"
-            $ISO = $ISO_FILES['SVR2012R2']
-        } else {
-            $MyWinVer = "2012R2DE"
-            $WimVal = "2"
-            $ISO = $ISO_FILES['SVR2012R2']
-        }
-        $detectedOS = "Windows Server 2012 R2"
-    }
-}
-
-# Create the information display
-if ($MyWinVer) {
-    Write-BoxedText -Title "SYSTEM DETECTION" -Messages @(
-        "$detectedOS detected",
-        "Build Number: $($OSVersion.Build)",
-        "System Type: $MyWinVer",
-        "Architecture: $(if ($IsARM64) { 'ARM64' } else { 'x64' })",
-        "Using ISO: $ISO",
-        "WIM Value: $(if ($WimVal) { $WimVal } else { 'Not Required' })"
-    ) -ForegroundColor Green
-} else {
-    Write-BoxedText -Title "SYSTEM DETECTION ERROR" -Messages @(
-        "Unable to automatically detect Windows version",
-        "OS Caption: $($OSInfo.Caption)",
-        "Version: $($OSVersion.ToString())",
-        "Build: $($OSVersion.Build)"
-    ) -ForegroundColor Red
-}
-
-# Verify that we successfully detected the OS
-if (-not $MyWinVer) {
-    Write-Host "Error: Unable to automatically detect Windows version." -ForegroundColor Red
-    Write-Host "OS Details:" -ForegroundColor Yellow
-    Write-Host "Caption: $($OSInfo.Caption)" -ForegroundColor Yellow
-    Write-Host "Version: $($OSVersion.ToString())" -ForegroundColor Yellow
-    Write-Host "Build: $($OSVersion.Build)" -ForegroundColor Yellow
-    Exit 1
-}
-
-# Display detected OS information
-#Write-Host "Using ISO: $ISO" -ForegroundColor Green
-#Write-Host "WIM Value: $WimVal" -ForegroundColor Green
-
-## NAS Source for ISO Files in case they are missing from C: Drive
-## For example path should map out to \\10.11.11.10\DATA\ISO\WINDOWS\ISOIMAGE.ISO 
-$NasIP = "192.168.111.10"
-$NasShare = "nas-data"
-$NasFolderPath = "ISO\WINDOWS"
-$SourceISO="\\"+$NasIP+"\"+$NasShare+"\"+$NasFolderPath+"\"+$ISO
-
-# Network share credential management
-$CredentialPath = "$env:USERPROFILE\FixWindows-Credentials.xml"
-$NetworkPath = "\\$NasIP\$NasShare"
-
-function Connect-NetworkShare {
-    param(
-        [string]$NetworkPath,
-        [PSCredential]$Credential
-    )
-    
-    # First try to access without credentials
-    try {
-        $null = Get-ChildItem $NetworkPath -ErrorAction Stop
-        Write-Host "Network share accessible without additional credentials" -ForegroundColor Green
-        return $true
-    }
-    catch {
-        Write-Host "Network share requires credentials" -ForegroundColor Yellow
-    }
-    
-    # Check if stored credentials exist
-    if (Test-Path $CredentialPath) {
-        Write-Host "Found stored credentials, attempting to use them..." -ForegroundColor Cyan
-        try {
-            $StoredCredential = Import-Clixml -Path $CredentialPath
-            $null = New-PSDrive -Name "TempNAS" -PSProvider FileSystem -Root $NetworkPath -Credential $StoredCredential -ErrorAction Stop
-            Remove-PSDrive -Name "TempNAS" -Force
-            Write-Host "Successfully connected using stored credentials" -ForegroundColor Green
-            return $true
-        }
-        catch {
-            Write-Host "Stored credentials failed, will prompt for new ones" -ForegroundColor Yellow
-            Remove-Item $CredentialPath -Force -ErrorAction SilentlyContinue
-        }
-    }
-    
-    # Prompt for new credentials
-    Write-Host "Please provide credentials for network share: $NetworkPath" -ForegroundColor Yellow
-    $Credential = Get-Credential -Message "Enter credentials for $NetworkPath"
-    
-    if ($Credential) {
-        try {
-            $null = New-PSDrive -Name "TempNAS" -PSProvider FileSystem -Root $NetworkPath -Credential $Credential -ErrorAction Stop
-            Remove-PSDrive -Name "TempNAS" -Force
-            
-            # Store encrypted credentials
-            $Credential | Export-Clixml -Path $CredentialPath
-            Write-Host "Credentials verified and stored securely" -ForegroundColor Green
-            return $true
-        }
-        catch {
-            Write-Host "Failed to connect with provided credentials: $($_.Exception.Message)" -ForegroundColor Red
-            return $false
-        }
-    }
-    else {
-        Write-Host "No credentials provided" -ForegroundColor Red
-        return $false
-    }
-}
-## Specify the Drive Letter that the ISO Will be copied down to
-$DestDrive="C:\"
-## Specify the Name of the Local folder where the ISO will be placed
-$DestFolder="SVC"
-## Files/Logs/Objects in Cleanup Routine older than this number of days will be deleted 
-$DaysToDelete = 1
-## Discovered User Profiles that havent logged in for more than this number of days will be deleted
-$ProfileAge= 30
-## Specify the Backup Folder To Rotate All The Event Logs to a Subfolder i.e. February-18 will
-## Be created there and log logs will be saved there before wiping the event logs clean 
-$Today = Get-Date -Format "MMMM-dd"
-$EventLogBackupFolder = $DestDrive+"Logs\" + "$Today"
-##################################################################################################
-## Variable Declarations and Constants
-
-## Setup Paths to ISOs
-$DestPath=$DestDrive+$DestFolder+'\'
-$DestinationISO = $DestPath+$ISO
-$Logfile=("C:\SVC\Clean-" + (get-date -format "MM-d-yy") + '.log')
-
-## Begin the timer
-$StartTime = (Get-Date)
-
-# Detect Elevation and Exit if not elevated:
-$CurrentUser=[System.Security.Principal.WindowsIdentity]::GetCurrent()
-$UserPrincipal=New-Object System.Security.Principal.WindowsPrincipal($CurrentUser)
-$AdminRole=[System.Security.Principal.WindowsBuiltInRole]::Administrator
-$IsAdmin=$UserPrincipal.IsInRole($AdminRole)
-if ($IsAdmin) {[console]::beep(784,150)}
-else {
-        throw "Script is not running elevated, which means your are not running as Admin which is required. Restart the script from an elevated prompt."
-        [console]::beep(100,2000)
-    }
-start-sleep -s 3
-Clear-Host
-
-## Make Sure We are Using TLS Version 1.2 or Higher
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-## Installs Nuget Package
-try {
-    # Check if NuGet provider is already installed
-    if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-        Write-Host "Installing NuGet package provider..." -ForegroundColor Yellow
-        Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false | Out-Null
-        Write-Host "NuGet package provider installed successfully." -ForegroundColor Green
-    } else {
-        Write-Host "NuGet package provider is already installed." -ForegroundColor Green
-    }
-} catch {
-    Write-Warning "Failed to install NuGet package provider: $($_.Exception.Message)"
-    Write-Host "Attempting alternative installation method..." -ForegroundColor Yellow
-    try {
-        # Alternative: Try to configure PowerShellGet if available
-        Write-Host "Attempting to configure PowerShell Gallery..." -ForegroundColor Yellow
-        
-        # Import PowerShellGet module if available
-        if (Get-Module -ListAvailable -Name PowerShellGet -ErrorAction SilentlyContinue) {
-            Import-Module PowerShellGet -Force -ErrorAction SilentlyContinue
-            
-            # Try to configure PSGallery repository
-            if (-not (Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue)) {
-                Register-PSRepository -Default -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-            }
-            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
-            Write-Host "PSGallery repository configured successfully." -ForegroundColor Green
-        } else {
-            Write-Host "PowerShellGet module not available, skipping repository configuration." -ForegroundColor Yellow
-        }
-    } catch {
-        Write-Warning "Failed to configure package management: $($_.Exception.Message)"
-        Write-Host "Continuing without PowerShell Gallery configuration." -ForegroundColor Yellow
-    }
-}
-
-## Tests if the log file already exists and Deletes old file if there is a conflict
-if(Test-Path $Logfile)
-    {
-    #Delete previous file if one exists from same day
-    try {
-        # Stop any existing transcript before removing the file
-        try { Stop-Transcript -ErrorAction SilentlyContinue } catch { }
-        
-        # Wait a moment for file handles to release
-        Start-Sleep -Milliseconds 500
-        
-        # Try to remove the file
-        Remove-Item $Logfile -Force -Verbose
-        Write-Host "Previous log file removed successfully." -ForegroundColor Yellow
-    } catch {
-        Write-Warning "Could not remove existing log file: $($_.Exception.Message)"
-        Write-Host "Will append to existing log file instead." -ForegroundColor Yellow
-    }
-    
-    ## Starts a transcript Log of Activities in User Desktop
-    Write-Host (Start-Transcript -Path $Logfile -Append) -ForegroundColor Green
-    } 
-else 
-    {
-    ## Starts a transcript Log of Activities in User Desktop
-    Write-Host (Start-Transcript -Path $Logfile) -ForegroundColor Green
-    }
-
-
-## Function Plays a few Notes to Mission Impossible tune
-Function Use-MissionImpossible
-{
-[console]::beep(784,150)
-Start-Sleep -m 300
-[console]::beep(784,150)
-Start-Sleep -m 300
-[console]::beep(932,150)
-Start-Sleep -m 150
-[console]::beep(1047,150)
-Start-Sleep -m 150
-[console]::beep(784,150)
-Start-Sleep -m 300
-[console]::beep(784,150)
-}
-## End Function Play MI 
-
-## Function Plays Nintendo Mario Tune
-Function Use-Mario
-{
-[console]::beep(659,100) ##E
-[console]::beep(659,100) ##E
-Start-Sleep -m 250
-[console]::beep(659,100) ##E
-Start-Sleep -m 250
-[console]::beep(523,100) ##C
-[console]::beep(659,100) ##E
-Start-Sleep -m 250
-[console]::beep(784,100) ##G
-Start-Sleep -m 475
-[console]::Beep(395,250) ##G
-}
-## Improved by WDA Mar 31 2023
-#End Play Nintendo
-
-Function Start-CleanMGR {
-    Try{
-        Write-Host "Windows Disk Clean is running.                                                                  " -NoNewline -ForegroundColor DarkGreen 
-        Start-Process -FilePath Cleanmgr -ArgumentList '/sagerun:100' -Wait 
-        Write-Host "[DONE]" -ForegroundColor DarkGreen 
-    }
-    Catch [System.Exception]{
-        Write-host "cleanmgr is not installed! To use this portion of the script you must install the following windows features:" -ForegroundColor Red -NoNewline 
-        Write-host "[ERROR]" -ForegroundColor Red 
-    }
-} 
-
-#####################################################################################
-################################  START OF EXECUTION ################################
-#####################################################################################
-
-## Display Intro Screen
-Write-Host ""
-## Test for and Build the Drive Letters string based on on your system for Volume-Repair & Check i.e. ACD will be the string if Drives A, C and D are found
-$ExistingDrives=$null
-if (Test-Path "A:") {$ExistingDrives=$ExistingDrives+'A'}
-if (Test-Path "B:") {$ExistingDrives=$ExistingDrives+'B'}
-if (Test-Path "C:") {$ExistingDrives=$ExistingDrives+'C'}
-if (Test-Path "D:") {$ExistingDrives=$ExistingDrives+'D'}
-if (Test-Path "E:") {$ExistingDrives=$ExistingDrives+'E'}
-if (Test-Path "F:") {$ExistingDrives=$ExistingDrives+'F'}
-if (Test-Path "G:") {$ExistingDrives=$ExistingDrives+'G'}
-if (Test-Path "H:") {$ExistingDrives=$ExistingDrives+'H'}
-if (Test-Path "I:") {$ExistingDrives=$ExistingDrives+'I'}
-if (Test-Path "J:") {$ExistingDrives=$ExistingDrives+'J'}
-if (Test-Path "K:") {$ExistingDrives=$ExistingDrives+'K'}
-if (Test-Path "L:") {$ExistingDrives=$ExistingDrives+'L'}
-if (Test-Path "M:") {$ExistingDrives=$ExistingDrives+'M'}
-if (Test-Path "N:") {$ExistingDrives=$ExistingDrives+'N'}
-if (Test-Path "O:") {$ExistingDrives=$ExistingDrives+'O'}
-if (Test-Path "P:") {$ExistingDrives=$ExistingDrives+'P'}
-if (Test-Path "Q:") {$ExistingDrives=$ExistingDrives+'Q'}
-if (Test-Path "R:") {$ExistingDrives=$ExistingDrives+'R'}
-if (Test-Path "S:") {$ExistingDrives=$ExistingDrives+'S'}
-if (Test-Path "T:") {$ExistingDrives=$ExistingDrives+'T'}
-if (Test-Path "U:") {$ExistingDrives=$ExistingDrives+'U'}
-if (Test-Path "V:") {$ExistingDrives=$ExistingDrives+'V'}
-if (Test-Path "W:") {$ExistingDrives=$ExistingDrives+'W'}
-if (Test-Path "X:") {$ExistingDrives=$ExistingDrives+'X'}
-if (Test-Path "Y:") {$ExistingDrives=$ExistingDrives+'Y'}
-if (Test-Path "Z:") {$ExistingDrives=$ExistingDrives+'Z'}
-
-Write-BoxedText -Title "SYSTEM MAINTENANCE" -Messages @(
-    "PRESS CTRL-C TO ABORT NOW",
-    "",
-    "WINDOWS",
-    "Powershell Maintenance",
-    "and Cleanup Routines",
-    "",
-    "(C) 2025 David Andrews"
-) -ForegroundColor White
-
-Write-BoxedText -Title "IMPORTANT NOTICE" -Messages @(
-    "Please check that the ISO & file/path referenced below",
-    "corresponds to your system. This is critical for the",
-    "script to run properly. This script must also be run from",
-    "the privilege elevated Shortcut which is included in the",
-    "SVC folder and named Maintenance. This shortcut can be",
-    "moved to your desktop for convenience."
-) -ForegroundColor Blue
-
-Write-Host ""
-
-# Center the date display
-$dateText = "Today is $($StartTime | Select-Object -ExpandProperty DateTime)"
-$consoleWidth = $Host.UI.RawUI.WindowSize.Width
-$leftPadding = " " * [Math]::Max(0, [Math]::Floor(($consoleWidth - $dateText.Length) / 2))
-Write-Host ($leftPadding + $dateText) -ForegroundColor Green
-
-Write-BoxedText -Title "SYSTEM INFORMATION" -Messages @(
-    "Host: $(Hostname)",
-    "Drive Letters $ExistingDrives were discovered and will be checked!"
-) -ForegroundColor Green
-
-Write-BoxedText -Title "ISO SOURCE" -Messages @(
-    "Source Path: $SourceISO"
-) -ForegroundColor White
-Write-Host ""
-
-## Play intro MI tune
-Use-MissionImpossible
-Write-Host ""
-
-# Display a custom message with red background and bright yellow text
-Write-Host "Press CTRL-C to abort this script now..." -BackgroundColor Red -ForegroundColor Yellow
-
-# Add a slight delay to ensure the message is visible before the progress bar starts
-Start-Sleep -Milliseconds 500
-
-# Display a regressive progress bar for 15 seconds
-for ($i = 15; $i -ge 0; $i--) {
-    Write-Progress -Activity "Time remaining: $i seconds" -Status "Please wait..." -PercentComplete ((15 - $i) / 15 * 100)
-    Start-Sleep -Seconds 1
-}
-
-# Clear the progress bar
-Write-Progress -Activity "Time remaining" -Completed
-
-## Checks if ISO is already on Local Drive
-If (Test-Path $DestinationISO)
-    {
-    ## Yes
-    Write-Host ""
-    Write-Host "   Windows ISO file was detected at " $DestinationISO -ForegroundColor Green
-    [console]::beep(1000,300)
-    }
-else 
-    {
-    ## No - Need to download ISO
-    Write-Host "Attempting to connect to network share..." -ForegroundColor Cyan
-    
-    # Check network share connectivity and credentials
-    if (-not (Connect-NetworkShare -NetworkPath $NetworkPath -CredentialPath $CredentialPath)) {
-        Write-Host "Failed to connect to network share. Cannot download ISO." -ForegroundColor Red
-        Write-Host "Please check network connectivity and credentials." -ForegroundColor Yellow
-        exit 1
-    }
-    
-    # Load stored credentials if they exist
-    $NetworkCredential = $null
-    if (Test-Path $CredentialPath) {
-        $NetworkCredential = Import-Clixml -Path $CredentialPath
-    }
-    
-    if (-Not (Test-Path $DestPath)) 
-        ## Create Local Folder
-        {
-        #Make folder First if Non-existent and Then Copy Down ISO
-        New-Item -Path $DestDrive -Name $DestFolder -ItemType "directory" -Force
-        ## Copy down Windows ISO Image from NAS Source 
-        [console]::beep(100,1000)
-        Write-Host "" 
-        Write-BoxedText -Title "ISO DOWNLOAD REQUIRED" -Messages @(
-            "COPYING DOWN WINDOWS ISO IMAGE TO LOCAL DRIVE SINCE",
-            "IT WAS NOT FOUND IN SERVICE FOLDER LOCALLY"
-        ) -ForegroundColor DarkYellow
-        
-        # Use credentials if available
-        if ($NetworkCredential) {
-            $null = New-PSDrive -Name "NASISO" -PSProvider FileSystem -Root $NetworkPath -Credential $NetworkCredential
-            Copy-Item -Path $SourceISO -Destination $DestPath -Force
-            Remove-PSDrive -Name "NASISO" -Force
-        }
-        else {
-            Copy-Item -Path $SourceISO -Destination $DestPath -Force
-        }
-        }
-    else  
-        {
-        ## Just Copy down Windows ISO from NAS Source
-        [console]::beep(100,2000)
-        Write-Host "" 
-        Write-BoxedText -Title "ISO DOWNLOAD REQUIRED" -Messages @(
-            "COPYING DOWN WINDOWS ISO IMAGE TO LOCAL DRIVE SINCE",
-            "IT WAS NOT FOUND IN SERVICE FOLDER LOCALLY"
-        ) -ForegroundColor DarkYellow
-        
-        # Use credentials if available
-        if ($NetworkCredential) {
-            $null = New-PSDrive -Name "NASISO" -PSProvider FileSystem -Root $NetworkPath -Credential $NetworkCredential
-            Copy-Item -Path $SourceISO -Destination $DestPath -Force
-            Remove-PSDrive -Name "NASISO" -Force
-        }
-        else {
-            Copy-Item -Path $SourceISO -Destination $DestPath -Force
-        }
-        }
-    }
-
-## System Maintenance with DISM Repair Tool Using Local ISO Image
-Write-Host "" 
-Write-BoxedText -Title "WINDOWS HEALTH CHECK" -Messages @(
-    "THIS WILL TAKE QUITE A",
-    "BIT. PLEASE BE PATIENT."
-) -ForegroundColor White
-
-Write-BoxedText -Title "DISM HEALTH SCAN" -ForegroundColor White
-Dism /online /cleanup-image /scanhealth
-
-Write-BoxedText -Title "HEALTH DETERMINATION" -ForegroundColor White
-dism /online /cleanup-image /checkhealth
-
-Write-BoxedText -Title "APPLYING HEALTH FIXES" -ForegroundColor White
-
-Write-BoxedText -Title "MOUNTING WINDOWS IMAGE" -ForegroundColor White
-Mount-DiskImage -ImagePath $DestinationISO
-$Disk = ((Get-DiskImage $DestinationISO | Get-Volume).DriveLetter)
-$Disk = $Disk + ':'
-
-Write-BoxedText -Title "DISK ISO MOUNTED" -Messages @(
-    "AS DRIVE LETTER $DISK"
-) -ForegroundColor White
-
-Write-BoxedText -Title "PERFORMING REPAIRS" -ForegroundColor White
-dism /online /cleanup-image /restorehealth /source:WIM:$Disk\sources\install.wim:$WimVal /limitaccess
-
-Write-BoxedText -Title "DISMOUNTING WINDOWS IMAGE" -ForegroundColor White
-Dismount-DiskImage -ImagePath $DestinationISO
-
-Write-BoxedText -Title "RUNNING SYSTEM FILE CHECK" -ForegroundColor White
-sfc /scannow
-
-Write-BoxedText -Title "RUN VOLUME REPAIR" -Messages @(
-    "REPAIRING VOLUME(S) $ExistingDrives"
-) -ForegroundColor White
-
-## Run a Repair-Volumes on Volume Drive Letters Defined in Variable $ExistingDrives
-Repair-Volume -DriveLetter $ExistingDrives -OfflineScanAndFix
-Write-Host ""
-
-## Gathers the amount of disk space used before running the script
-$BeforeUsage = Get-WmiObject Win32_LogicalDisk | Where-Object { $_.DriveType -eq "3" } | Select-Object SystemName,
-@{ Name = "Drive" ; Expression = { ( $_.DeviceID ) } },
-@{ Name = "Size (GB)" ; Expression = {"{0:N1}" -f ( $_.Size / 1gb)}},
-@{ Name = "FreeSpace (GB)" ; Expression = {"{0:N1}" -f ( $_.Freespace / 1gb ) } },
-@{ Name = "PercentFree" ; Expression = {"{0:P1}" -f ( $_.FreeSpace / $_.Size ) } } |
-    Format-Table -AutoSize |
-    Out-String
-
-## Lets Start Actually Cleaning
-Write-BoxedText -Title "STARTING THE ACTUAL CLEANING PROCESSES" -ForegroundColor DarkGreen
-
-## Archive and Clear Out Event Logs
-Write-BoxedText -Title "ARCHIVE EVENT LOGS" -ForegroundColor DarkGreen
-$LogNames = (get-WinEvent -ListLog * | Where-Object{$_.RecordCount -gt 0}) | ForEach-Object{$_.LogName}
-"Exporting $($LogNames.count) Logs to $($EventLogBackupFolder)..."
-If (!(Test-Path $EventLogBackupFolder)) {New-Item $EventLogBackupFolder -Type Directory -Force}
-Foreach ($Log in $LogNames) {
-    $LogNamesFolder = "$($EventLogBackupFolder)\$($Log.Replace("/","_"))" + ".evtx"
-    wevtutil epl $Log $LogNamesFolder /ow:true
-    wevtutil cl $Log
-}
-Write-Host "" 
-
-## Stops the windows update service so that c:\windows\softwaredistribution can be cleaned up
-Write-BoxedText -Title "STARTING WINDOWS UPDATE" -Messages @(
-    "CLEANUP ROUTINES"
-) -ForegroundColor DarkGreen
-Write-Host ""
-Write-BoxedText -Title "STOPPING WIN UPDATE SVC" -ForegroundColor DarkGreen
-Get-Service -Name wuauserv | Stop-Service -Force -ErrorAction SilentlyContinue
-Write-Host ""  
-
-## Deletes the contents of windows software distribution.
-Write-BoxedText -Title "DELETING OLD UPDATE FILES" -ForegroundColor DarkGreen
-Get-ChildItem "C:\Windows\SoftwareDistribution\*" -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -recurse -ErrorAction SilentlyContinue 
-Write-Host "The Contents of Windows SoftwareDistribution have been removed successfully!" -ForegroundColor DarkGreen 
-Write-Host "" 
-
-## Deletes the contents of the Windows Temp folder.
-Write-BoxedText -Title "DELETING WIN TEMP FOLDER" -ForegroundColor DarkGreen
-Get-ChildItem "C:\Windows\Temp\*" -Recurse -Force  -ErrorAction SilentlyContinue |
-    Where-Object { ($_.CreationTime -lt $(Get-Date).AddDays( - $DaysToDelete)) } | Remove-Item -force -recurse -ErrorAction SilentlyContinue 
-Write-host "The Contents of `$env:TEMP have been removed successfully!" -ForegroundColor DarkGreen
-Write-Host "" 
-
-## Deletes all files and folders in user's Temp folder older then $DaysToDelete
-Write-BoxedText -Title "DELETING USER TEMP FOLDER" -Messages @(
-    "FILES OLDER THAN $DaysToDelete Days"
-) -ForegroundColor DarkGreen
-Get-ChildItem "C:\users\*\AppData\Local\Temp\*" -Recurse -Force -ErrorAction SilentlyContinue |
-    Where-Object { ($_.CreationTime -lt $(Get-Date).AddDays( - $DaysToDelete))} |
-    Remove-Item -force -recurse -ErrorAction SilentlyContinue 
-Write-Host "The contents of `$env:TEMP have been removed successfully!" -ForegroundColor DarkGreen 
-Write-Host "" 
-
-## Removes all files and folders in user's Temporary Internet Files older then $DaysToDelete
-Write-BoxedText -Title "DELETING TEMP INTERNET" -Messages @(
-    "FILES OLDER THAN $DaysToDelete Days"
-) -ForegroundColor DarkGreen
-Get-ChildItem "C:\users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\*" `
-    -Recurse -Force  -ErrorAction SilentlyContinue |
-    Where-Object {($_.CreationTime -lt $(Get-Date).AddDays( - $DaysToDelete))} |
-    Remove-Item -Force -Recurse -ErrorAction SilentlyContinue 
-Write-Host "All Temporary Internet Files have been removed successfully!" -ForegroundColor DarkGreen 
-Write-Host ""
-
-## Removes *.log from C:\windows\CBS
-Write-BoxedText -Title "DELETING CBS LOG FILES" -ForegroundColor DarkGreen
-if(Test-Path C:\Windows\logs\CBS\){
-    Get-ChildItem "C:\Windows\logs\CBS\*.log" -Recurse -Force -ErrorAction SilentlyContinue |
-        remove-item -force -recurse -ErrorAction SilentlyContinue 
-    Write-Host "All CBS logs have been removed successfully!" -ForegroundColor DarkGreen 
-} else {
-    Write-WarningBox "C:\Windows\logs\CBS\ does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans IIS Logs older then $DaysToDelete
-Write-BoxedText -Title "DELETING IIS SERVER LOG" -Messages @(
-    "FILES OLDER THAN $DaysToDelete Days"
-) -ForegroundColor DarkGreen
-if (Test-Path C:\inetpub\logs\LogFiles\) {
-    Get-ChildItem "C:\inetpub\logs\LogFiles\*" -Recurse -Force -ErrorAction SilentlyContinue |
-        Where-Object { ($_.CreationTime -lt $(Get-Date).AddDays(-60)) } | Remove-Item -Force  -Recurse -ErrorAction SilentlyContinue
-    Write-Host "All IIS Logfiles over $DaysToDelete days old have been removed Successfully!" -ForegroundColor DarkGreen 
-} else {
-    Write-WarningBox "C:\inetpub\logs\LogFiles\ does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes C:\Config.Msi
-Write-BoxedText -Title "DELETING C:\Config.Msi" -ForegroundColor DarkGreen
-if (test-path C:\Config.Msi){
-    remove-item -Path C:\Config.Msi -force -recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Config.Msi does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes c:\Intel
-Write-BoxedText -Title "DELETING C:\Intel" -ForegroundColor DarkGreen
-if (test-path c:\Intel){
-    remove-item -Path c:\Intel -force -recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "c:\Intel does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes c:\Dell
-Write-BoxedText -Title "DELETING C:\Dell" -ForegroundColor DarkGreen
-if (test-path c:\Dell){
-    remove-item -Path c:\Dell -force -recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "c:\Dell does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes c:\PerfLogs
-Write-BoxedText -Title "DELETING PERF LOGS" -ForegroundColor DarkGreen
-if (test-path c:\PerfLogs){
-    remove-item -Path c:\PerfLogs -force -recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "c:\PerfLogs does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes $env:windir\memory.dmp
-Write-BoxedText -Title "DELETING WINDOWS CRASHDUMPS" -ForegroundColor DarkGreen
-if (test-path $env:windir\memory.dmp){
-    remove-item $env:windir\memory.dmp -force  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Windows\memory.dmp does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes rogue folders
-Write-BoxedText -Title "DELETING ROGUE FOLDERS" -ForegroundColor DarkGreen
-if (test-path c:\BadFolder){
-    remove-item -Path c:\BadFolder -force -recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Badfolder does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Removes Windows Error Reporting files
-Write-BoxedText -Title "DELETING WINDOWS ERROR FILES" -ForegroundColor DarkGreen
-if (test-path C:\ProgramData\Microsoft\Windows\WER){
-    Get-ChildItem -Path C:\ProgramData\Microsoft\Windows\WER -Recurse | Remove-Item -force -recurse  -ErrorAction SilentlyContinue
-    Write-host "Deleting Windows Error Reporting files" -ForegroundColor DarkGreen 
-} else {
-    Write-WarningBox "C:\ProgramData\Microsoft\Windows\WER does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans up c:\windows\temp
-Write-BoxedText -Title "DELETING WINDOWS TEMP FOLDER" -ForegroundColor DarkGreen
-if (Test-Path $env:windir\Temp\) {
-    Remove-Item -Path "$env:windir\Temp\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Windows\Temp does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans up minidump files
-Write-BoxedText -Title "DELETING WINDOWS MINIDUMPS" -ForegroundColor DarkGreen
-if (Test-Path $env:windir\minidump\) {
-    Remove-Item -Path "$env:windir\minidump\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "$env:windir\minidump\ does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans up prefetch
-Write-BoxedText -Title "CLEANING WINDOWS PREFETCH" -ForegroundColor DarkGreen
-if (Test-Path $env:windir\Prefetch\) {
-    Remove-Item -Path "$env:windir\Prefetch\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "$env:windir\Prefetch\ does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans up user temp folders
-Write-BoxedText -Title "CLEANING USER TEMP FOLDER" -ForegroundColor DarkGreen
-if (Test-Path "C:\Users\*\AppData\Local\Temp\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Temp\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Temp\ does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans up Windows error reporting
-Write-BoxedText -Title "CLEANING USER WER FOLDER" -ForegroundColor DarkGreen
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\WER\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\WER\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\ProgramData\Microsoft\Windows\WER does not exist, there is nothing to Clean!"
-}
-Write-Host ""
-
-## Cleans up users temporary internet files
-Write-BoxedText -Title "CLEANING ALL USERS TMP FOLDERS" -ForegroundColor DarkGreen
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\*" -Force -Recurse  -ErrorAction SilentlyContinue 
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\ does not exist! "
-}
-Write-Host ""
-
-## Cleans up Internet Explorer cache
-Write-BoxedText -Title "CLEANING INTERNET EXPLORER CACHE" -ForegroundColor DarkGreen
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatCache\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatCache\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatCache\ does not exist! "
-}
-
-## Cleans up Internet Explorer cache
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatUaCache\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatUaCache\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Windows\IECompatUaCache\ does not exist! "
-}
-Write-Host ""
-
-## Cleans up Internet Explorer download history
-Write-BoxedText -Title "CLEANING IE RELATED HISTORY" -ForegroundColor DarkGreen
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\IEDownloadHistory\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\IEDownloadHistory\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Windows\IEDownloadHistory\ does not exist! "
-}
-
-## Cleans up Internet Cache
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\ does not exist! "
-}
-
-## Cleans up Internet Cookies
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCookies\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Windows\INetCookies\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Windows\INetCookies\ does not exist! "
-}
-Write-Host ""
-
-## Cleans up terminal server cache
-Write-BoxedText -Title "CLEANING TERMINAL SERVER CACHE" -ForegroundColor DarkGreen
-if (Test-Path "C:\Users\*\AppData\Local\Microsoft\Terminal Server Client\Cache\") {
-    Remove-Item -Path "C:\Users\*\AppData\Local\Microsoft\Terminal Server Client\Cache\*" -Force -Recurse  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\Users\*\AppData\Local\Microsoft\Terminal Server Client\Cache\ does not exist! "
-}
-Write-host "Removing System and User Temp Files." -ForegroundColor DarkGreen 
-Write-Host ""
-
-## Removes the hidden recycling bin.
-Write-BoxedText -Title "REMOVING HIDDEN RECYCLE BIN" -ForegroundColor DarkGreen
-if (Test-path 'C:\$Recycle.Bin'){
-    Remove-Item 'C:\$Recycle.Bin' -Recurse -Force  -ErrorAction SilentlyContinue
-} else {
-    Write-WarningBox "C:\`$Recycle.Bin does not exist, there is nothing to Clean! "
-}
-Write-Host ""
-
-## CLEAN OUT OLD USER PROFILES OLDER THAN $PROFILEAGE DAYS
-
-Write-BoxedText -Title "STARTING USER PROFILE CLEANUP" -ForegroundColor DarkGreen
-Write-Host "Checking for user profiles that are older than $ProfileAge days..." -ForegroundColor DarkGreen 
-Get-WmiObject -Class Win32_UserProfile | Where-Object {
-    (!$_.Special) -and 
-    ($_.SID -notmatch '-500$') -and
-    ($_.LastUseTime -ne $null) -and
-    ([Management.ManagementDateTimeConverter]::ToDateTime($_.LastUseTime) -lt (Get-Date).AddDays(-$ProfileAge))
-} | ForEach-Object {
-    Write-Host "Removing user profile: $($_.LocalPath)" -ForegroundColor Yellow
-    try {
-        $_ | Remove-WmiObject
-        Write-Host "Successfully removed profile: $($_.LocalPath)" -ForegroundColor Green
-    } catch {
-        Write-Warning "Failed to remove profile $($_.LocalPath): $($_.Exception.Message)"
-    }
-}
-Write-Host ""
-
-## CLEAN OUT ALL WINDOWS SNAPSHOTS / SHADOW COPIES
-Write-BoxedText -Title "DELETING WINDOWS SHADOW COPIES" -ForegroundColor DarkGreen
-Invoke-Expression "vssadmin.exe Delete Shadows /ALL /Quiet"
-Write-Host ""   
-
-## Checks the version of PowerShell to empty recycle bin properly
-Write-BoxedText -Title "DUMP OUT RECYCLE BIN" -ForegroundColor DarkGreen
-## If PowerShell version 4 or below 
-if ($PSVersionTable.PSVersion.Major -le 4) {
-    ## Empties the recycling bin, the desktop recyling bin
-    $Recycler = (New-Object -ComObject Shell.Application).NameSpace(0xa)
-    $Recycler.items() | ForEach-Object { 
-        ## If PowerShell version 4 or below
-        Remove-Item -Include $_.path -Force -Recurse 
-        Write-Host "The recycling bin has been cleaned up successfully! " -NoNewline -ForegroundColor DarkGreen 
-    }
-} elseif ($PSVersionTable.PSVersion.Major -ge 5) {
-        ## If PowerShell version 5 is running on the machine the following will process
-        Clear-RecycleBin -DriveLetter C:\ -Force 
-        Write-Host "The recycling bin has been cleaned up successfully!                                               " -ForegroundColor DarkGreen
-}
-Write-Host ""
-
-## Restarts wuauserv Windows Updates Service
-Get-Service -Name wuauserv | Start-Service -ErrorAction SilentlyContinue
-
-## Clean out all system Logs in Windows
-Write-BoxedText -Title "RESET AND CLEAN WINDOWS LOGS" -ForegroundColor DarkGreen
-Get-EventLog -LogName * | ForEach-Object { Clear-EventLog $_.Log } -ErrorAction SilentlyContinue
-
-## Gathers disk usage after running the Clean Routines.
-$AfterUsage = Get-WmiObject Win32_LogicalDisk | Where-Object { $_.DriveType -eq "3" } | Select-Object SystemName,
-@{ Name = "Drive" ; Expression = { ( $_.DeviceID ) } },
-@{ Name = "Size (GB)" ; Expression = {"{0:N1}" -f ( $_.Size / 1gb)}},
-@{ Name = "FreeSpace (GB)" ; Expression = {"{0:N1}" -f ( $_.Freespace / 1gb ) } },
-@{ Name = "PercentFree" ; Expression = {"{0:P1}" -f ( $_.FreeSpace / $_.Size ) } } |
-    Format-Table -AutoSize | Out-String
-
-## Check for and Perform Windows Updates if needed (Patching) 
-Write-BoxedText -Title "RUN WINDOWS UPDATE" -ForegroundColor DarkGreen
-
-# Test PowerShellGet functionality
-$PowerShellGetWorking = $false
-try {
-    # Test if PowerShellGet can be imported without errors
-    $null = Import-Module PowerShellGet -Force -ErrorAction Stop
-    $null = Get-PSRepository -Name PSGallery -ErrorAction Stop
-    $PowerShellGetWorking = $true
-    Write-Host "PowerShellGet is working correctly." -ForegroundColor Green
-} catch {
-    Write-Warning "PowerShellGet is corrupted or unavailable: $($_.Exception.Message)"
-    Write-Host "Using alternative Windows Update method..." -ForegroundColor Yellow
-}
-
-if ($PowerShellGetWorking) {
-    # Try using PSWindowsUpdate module
-    try {
-        Set-PSRepository PSGallery -InstallationPolicy Trusted -ErrorAction Stop
-        Install-Module PSWindowsUpdate -Confirm:$False -Force:$true -ErrorAction Stop | Out-Null
-        Write-Host "PSWindowsUpdate module installed successfully." -ForegroundColor Green
-        
-        Get-WindowsUpdate
-        Install-WindowsUpdate -Confirm:$false
-    } catch {
-        Write-Warning "Failed to use PSWindowsUpdate module: $($_.Exception.Message)"
-        $PowerShellGetWorking = $false
-    }
-}
-
-if (-not $PowerShellGetWorking) {
-    # Use built-in Windows Update COM objects
-    try {
-        Write-Host "Using built-in Windows Update COM objects..." -ForegroundColor Yellow
-        $UpdateSession = New-Object -ComObject Microsoft.Update.Session
-        $UpdateSearcher = $UpdateSession.CreateUpdateSearcher()
-        
-        Write-Host "Searching for available updates..." -ForegroundColor Yellow
-        $SearchResult = $UpdateSearcher.Search("IsInstalled=0")
-        
-        if ($SearchResult.Updates.Count -gt 0) {
-            Write-Host "Found $($SearchResult.Updates.Count) available updates:" -ForegroundColor Yellow
-            
-            # Display update details
-            foreach ($Update in $SearchResult.Updates) {
-                Write-Host "  - $($Update.Title)" -ForegroundColor Cyan
-            }
-            
-            # Install updates
-            Write-Host "Installing updates..." -ForegroundColor Yellow
-            $UpdatesToInstall = New-Object -ComObject Microsoft.Update.UpdateColl
-            foreach ($Update in $SearchResult.Updates) {
-                $UpdatesToInstall.Add($Update)
-            }
-            
-            $Installer = $UpdateSession.CreateUpdateInstaller()
-            $Installer.Updates = $UpdatesToInstall
-            $InstallResult = $Installer.Install()
-            
-            if ($InstallResult.ResultCode -eq 2) {
-                Write-Host "Updates installed successfully!" -ForegroundColor Green
-                if ($InstallResult.RebootRequired) {
-                    Write-Host "A reboot is required to complete the installation." -ForegroundColor Yellow
-                }
-            } else {
-                Write-Warning "Update installation completed with result code: $($InstallResult.ResultCode)"
-            }
-        } else {
-            Write-Host "No updates available." -ForegroundColor Green
-        }
-    } catch {
-        Write-Warning "Could not check for Windows Updates: $($_.Exception.Message)"
-        Write-Host "Please check for updates manually in Windows Settings." -ForegroundColor Yellow
-    }
-}
-Write-Host "" 
-Write-BoxedText -Title "WINDOWS UPDATES COMPLETED" -ForegroundColor DarkGreen
-Write-Host "*******************************" -ForegroundColor DarkGreen
-
-
-Write-BoxedText -Title "FINAL CLEANING WITH CLEAN MGR" -ForegroundColor DarkGreen
-# Setup Cleanmgr Sageset profile:
-Write-Host "Starting Disk Cleanup utility..." -ForegroundColor DarkGreen
-$ErrorActionPreference = "SilentlyContinue"
-$CleanMgrKey = "HKLM:\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches"
-if (-not (get-itemproperty -path "$CleanMgrKey\Temporary Files" -name StateFlags0001))
-    {
-        set-itemproperty -path "$CleanMgrKey\Active Setup Temp Folders" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\BranchCache" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Downloaded Program Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Internet Cache Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Memory Dump Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Old ChkDsk Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Previous Installations" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Recycle Bin" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Service Pack Cleanup" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Setup Log Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\System error memory dump files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\System error minidump files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Temporary Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Temporary Setup Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Thumbnail Cache" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Update Cleanup" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Upgrade Discarded Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\User file versions" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows Defender" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows Error Reporting Archive Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows Error Reporting Queue Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows Error Reporting System Archive Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows Error Reporting System Queue Files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows ESD installation files" -name StateFlags0001 -type DWORD -Value 2
-        set-itemproperty -path "$CleanMgrKey\Windows Upgrade Log Files" -name StateFlags0001 -type DWORD -Value 2
-    }
-# Kick it off
-Write-Host "Starting Cleanmgr with full set of checkmarks (might take a while)..." -ForegroundColor DarkGreen
-$Process = (Start-Process -FilePath "$env:systemroot\system32\cleanmgr.exe" -ArgumentList "/sagerun:1" -Wait -PassThru)
-Write-Host "Clean Manager Finished  with exitcode [$($Process.ExitCode)]."   -ForegroundColor DarkGreen      
-Write-Host ""
-## END OF CLEAN MGR SECTION
-
-## Record Stop Global timer
-$EndTime=(Get-Date)
-
-## Display Summary
-Write-BoxedText -Title "JOB SUMMARY" -ForegroundColor White
-
-Write-Host "Machine Name: $(Hostname)" -ForegroundColor Green 
-Write-Host ""
-
-## Sends the disk usage before running the Clean script
-Write-BoxedText -Title "DISK USAGE BEFORE" -ForegroundColor DarkYellow
-Write-host $BeforeUsage -ForegroundColor DarkYellow
-
-## Sends the disk usage after running the Clean script
-Write-BoxedText -Title "DISK USAGE AFTER" -ForegroundColor White
-Write-Host $AfterUsage -ForegroundColor Green
-
-Write-Host "Execution of Maintenance Script completed at: $(Get-Date | Select-Object -ExpandProperty DateTime)" -ForegroundColor White 
-Write-Host "Code Execution Time : $(($EndTime - $StartTime).Minutes) minutes and $(($EndTime - $StartTime).Seconds) seconds" -ForegroundColor Green 
-
-Write-BoxedText -Title "SCRIPT COMPLETION" -Messages @(
-    "DAVID'S SCRIPT HAS",
-    "EXECUTED SUCCESSFULLY!"
-) -ForegroundColor Green
-
-Write-BoxedText -Title "SYSTEM REBOOT" -Messages @(
-    "REBOOTING SYSTEM NOW!",
-    "BOOT TIME REPAIR WILL OCCUR NOW!",
-    "IT WILL TAKE A WHILE TO BOOT AS THE",
-    "FILE SYSTEM PERFORMS A CHECK!",
-    "DO NOT RESET!!!"
-) -ForegroundColor Red
-
-## Completed Tasks Stop Logging!
-Write-Host (Stop-Transcript) -ForegroundColor DarkGreen
-
-## Sound Boot Countdown Warning
-[console]::beep(1000,500)
-Start-Sleep 1
-[console]::beep(1000,500)
-Start-Sleep 1   
-[console]::beep(1000,500)
-Start-Sleep 1    
-[console]::beep(1000,500)   
-Start-Sleep 1
-[console]::beep(1000,500)
-Start-Sleep 1   
-[console]::beep(1000,500)
-Start-Sleep 1    
-[console]::beep(1000,500)
-Start-Sleep 1    
-[console]::beep(1000,500)
-Start-Sleep 1    
-[console]::beep(100,2000)
-
-## RESTART NOW! 
-Restart-Computer -Force:$true -Confirm:$false
-
-# Add configuration file support
-function Get-ScriptConfig {
-    $configPath = Join-Path $PSScriptRoot "maintenance-config.json"
-    if (Test-Path $configPath) {
-        try {
-            $config = Get-Content $configPath | ConvertFrom-Json
-            return $config
-        }
-        catch {
-            Write-LogMessage "Error reading config file: $_" -Level Error
-            return $null
-        }
-    }
-    return $null
-}
-
-# Load config if available
-$config = Get-ScriptConfig
-if ($config) {
-    $DaysToDelete = $config.DaysToDelete
-    $ProfileAge = $config.ProfileAge
-    # ... other config values
-}
-
-# Add comment-based help
 <#
 .SYNOPSIS
     Comprehensive Windows system maintenance and cleanup script.
+
 .DESCRIPTION
-    Performs system maintenance tasks including:
-    - Windows system file integrity checks
-    - Disk cleanup and optimization
-    - Windows Update installation
-    - System logs cleanup
-    - Temporary file removal
-    - User profile cleanup
+    Performs system maintenance in ordered phases:
+      1. Platform detection (Windows 10/11 x64/ARM64, Server 2012 R2 - 2025, Core/Desktop)
+      2. ISO sync from network share (downloads/refreshes only when the source copy differs)
+      3. DISM ScanHealth / CheckHealth / RestoreHealth sourced from the local ISO,
+         with the WIM/ESD index resolved dynamically against the running edition
+      4. SFC scan and volume repair on all fixed drives
+      5. Event log archive + clear
+      6. Table-driven file cleanup (temp folders, caches, logs, dumps, vendor folders)
+      7. Stale user profile removal
+      8. Windows Update (PSWindowsUpdate module with COM fallback)
+      9. CleanMgr sweep, job summary, optional restart
+
+    All defaults can be overridden by FixWindows.config.json placed next to the
+    script (see the sample file). Explicit command-line parameters always win
+    over the config file, which wins over built-in defaults.
+
+    Requires Windows PowerShell 5.1 (ships with Windows) - no external modules
+    are required; PSWindowsUpdate is installed opportunistically and the script
+    falls back to the built-in Windows Update COM API when unavailable.
+
 .PARAMETER DaysToDelete
-    Number of days before temporary files are deleted
+    Files older than this many days are removed from age-filtered cleanup paths. Default 1.
+
 .PARAMETER ProfileAge
-    Number of days before unused user profiles are deleted
+    User profiles not used for this many days are removed. Default 30.
+
+.PARAMETER SkipHealthCheck
+    Skip the DISM/SFC/volume-repair phase (and therefore the ISO download).
+
 .PARAMETER SkipWindowsUpdate
-    Skip Windows Update check and installation
+    Skip the Windows Update phase.
+
 .PARAMETER NoRestart
-    Skip system restart after maintenance
+    Do not restart the computer when finished.
+
+.PARAMETER Unattended
+    Fully non-interactive: no countdown, no sounds, no credential prompts
+    (fails instead of prompting). Intended for scheduled-task use.
+
 .PARAMETER ISOSourcePath
-    Path to Windows ISO source files
+    UNC or local folder containing the Windows ISO files,
+    e.g. "\\192.168.111.10\nas-data\ISO\WINDOWS". Overrides the config file.
+
+.PARAMETER ConfigPath
+    Path to a JSON config file. Defaults to FixWindows.config.json beside the script.
+
 .EXAMPLE
-    .\PS-FixW11.ps1 -DaysToDelete 7 -ProfileAge 60
+    .\FixWindows.ps1
+.EXAMPLE
+    .\FixWindows.ps1 -DaysToDelete 7 -ProfileAge 60 -SkipWindowsUpdate
+.EXAMPLE
+    .\FixWindows.ps1 -Unattended -NoRestart -ISOSourcePath 'D:\ISO'
+.EXAMPLE
+    .\FixWindows.ps1 -WhatIf     # show what would be done without changing anything
+
 .NOTES
-    Author: David Andrews
-    Last Updated: 2024
+    Author: David Andrews  (C) 2022-2026 All Rights Reserved
+    Requires: Windows PowerShell 5.1, Administrator (self-elevates via UAC)
+    Log: C:\SVC\Clean-<date>.log
 #>
+#Requires -Version 5.1
+[CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium',
+    HelpUri = 'https://github.com/DavidDAndrews/FixWindows')]
+param(
+    [ValidateRange(0, 3650)]
+    [int]$DaysToDelete = 1,
 
-# Add better error handling function
-function Write-LogMessage {
-    [CmdletBinding()]
-    param(
-        [Parameter(Mandatory=$true)]
-        [string]$Message,
-        
-        [Parameter()]
-        [ValidateSet('Info','Warning','Error')]
-        [string]$Level = 'Info'
-    )
-    
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $logMessage = "[$timestamp] [$Level] $Message"
-    
-    switch ($Level) {
-        'Info'    { Write-Host $logMessage -ForegroundColor Green }
-        'Warning' { Write-Host $logMessage -ForegroundColor Yellow }
-        'Error'   { Write-Host $logMessage -ForegroundColor Red }
-    }
-    
-    Add-Content -Path $Logfile -Value $logMessage
-}
+    [ValidateRange(1, 3650)]
+    [int]$ProfileAge = 30,
 
-# Add try/catch blocks around critical operations
-try {
-    Write-LogMessage "Starting system maintenance"
-    
-    # Disk space before
-    $BeforeUsage = Get-DiskSpace
-    Write-LogMessage "Initial disk space: $($BeforeUsage)"
-    
-    # Main operations in try/catch blocks
-    try {
-        # DISM operations
-        Write-LogMessage "Starting DISM health check"
-        Dism /online /cleanup-image /scanhealth
-    }
-    catch {
-        Write-LogMessage "DISM operation failed: $_" -Level Error
-    }
-    
-    # Continue with other operations...
-}
-catch {
-    Write-LogMessage "Critical error occurred: $_" -Level Error
-    exit 1
-}
+    [switch]$SkipHealthCheck,
 
-# Add progress tracking
-$progressSteps = @(
-    "System File Check",
-    "Disk Cleanup",
-    "Windows Update",
-    "Profile Cleanup",
-    "Log Cleanup"
+    [switch]$SkipWindowsUpdate,
+
+    [switch]$NoRestart,
+
+    [switch]$Unattended,
+
+    [string]$ISOSourcePath,
+
+    [string]$ConfigPath
 )
 
-$currentStep = 0
-$totalSteps = $progressSteps.Count
+Set-StrictMode -Off
+$ErrorActionPreference = 'Stop'
 
-foreach ($step in $progressSteps) {
-    $currentStep++
-    $percentComplete = ($currentStep / $totalSteps) * 100
-    
-    Write-Progress -Activity "Windows Maintenance" -Status $step -PercentComplete $percentComplete
-    
-    switch ($step) {
-        "System File Check" {
-            Write-LogMessage "Starting System File Check"
-            # SFC operations...
+#region ============================ SELF-ELEVATION =============================
+
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host 'Not elevated - relaunching as Administrator (UAC prompt)...' -ForegroundColor Yellow
+    # Rebuild the exact argument list so parameters survive the relaunch
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    foreach ($entry in $PSBoundParameters.GetEnumerator()) {
+        if ($entry.Value -is [System.Management.Automation.SwitchParameter]) {
+            if ($entry.Value.IsPresent) { $argList += ('-{0}' -f $entry.Key) }
         }
-        "Disk Cleanup" {
-            Write-LogMessage "Starting Disk Cleanup"
-            # Cleanup operations...
+        else {
+            $argList += ('-{0}' -f $entry.Key)
+            $argList += ('"{0}"' -f $entry.Value)
         }
-        # Add other steps...
     }
-}
-
-function Backup-SystemState {
-    param(
-        [string]$BackupPath = "C:\Maintenance\Backups"
-    )
-    
     try {
-        $date = Get-Date -Format "yyyy-MM-dd-HHmm"
-        $backupFolder = Join-Path $BackupPath $date
-        
-        # Create backup folder
-        New-Item -Path $backupFolder -ItemType Directory -Force | Out-Null
-        
-        # Backup event logs
-        Write-LogMessage "Backing up event logs"
-        $LogNames | ForEach-Object {
-            $logPath = Join-Path $backupFolder "$_.evtx"
-            wevtutil epl $_ $logPath
-        }
-        
-        # Backup registry keys that will be modified
-        Write-LogMessage "Backing up registry settings"
-        reg export "HKLM\Software\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches" `
-            (Join-Path $backupFolder "VolumeCaches.reg") /y
-        
-        Write-LogMessage "System state backup completed successfully"
-        return $true
+        Start-Process -FilePath 'powershell.exe' -ArgumentList ($argList -join ' ') -Verb RunAs
     }
     catch {
-        Write-LogMessage "Backup failed: $_" -Level Error
-        return $false
+        Write-Host "Elevation was declined or failed: $($_.Exception.Message)" -ForegroundColor Red
+        exit 1
+    }
+    exit 0
+}
+
+#endregion
+
+#region ======================= DEFAULT CONFIGURATION ==========================
+# Everything in $Defaults can be overridden by FixWindows.config.json.
+# Explicit command-line parameters override both.
+
+$Defaults = @{
+    IsoSourcePath      = '\\192.168.111.10\nas-data\ISO\WINDOWS'
+    WorkFolder         = 'C:\SVC'
+    EventLogBackupRoot = 'C:\Logs'
+    DaysToDelete       = 1
+    ProfileAge         = 30
+    IisLogAgeDays      = 60
+    # Deleting shadow copies also deletes System Restore points, so this is
+    # opt-in. Set to true in the config file to restore the old behavior.
+    DeleteShadowCopies = $false
+    CreateRestorePoint = $true
+    # ISO file per platform key (keys produced by Get-PlatformInfo)
+    IsoFiles           = @{
+        WIN11       = 'W11PRO-24H2.ISO'
+        WIN11_ARM64 = 'W11Pro-ARM64.iso'
+        WIN10       = 'W10PRO-1809.ISO'
+        SVR2025     = 'W2025.ISO'
+        SVR2022     = 'W2022.ISO'
+        SVR2019     = 'W2019-1809.ISO'
+        SVR2016     = 'W2016-1607.ISO'
+        SVR2012R2   = 'W2012R2-1207.ISO'
+    }
+    # Folders whose entire contents are removed subject to the age filter.
+    # AgeDays 0 = delete regardless of age; -1 = use DaysToDelete.
+    CleanupPaths       = @(
+        @{ Path = 'C:\Windows\Temp\*';                                                          AgeDays = -1; Name = 'Windows temp folder' }
+        @{ Path = 'C:\Users\*\AppData\Local\Temp\*';                                            AgeDays = -1; Name = 'User temp folders' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\Temporary Internet Files\*';      AgeDays = -1; Name = 'Temporary internet files' }
+        @{ Path = 'C:\Windows\Logs\CBS\*.log';                                                  AgeDays = 0;  Name = 'CBS log files' }
+        @{ Path = 'C:\ProgramData\Microsoft\Windows\WER\*';                                     AgeDays = 0;  Name = 'Windows Error Reporting (system)' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\WER\*';                           AgeDays = 0;  Name = 'Windows Error Reporting (users)' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\INetCache\*';                     AgeDays = 0;  Name = 'INet cache' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\INetCookies\*';                   AgeDays = 0;  Name = 'INet cookies' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\IECompatCache\*';                 AgeDays = 0;  Name = 'IE compat cache' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\IECompatUaCache\*';               AgeDays = 0;  Name = 'IE compat UA cache' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Windows\IEDownloadHistory\*';             AgeDays = 0;  Name = 'IE download history' }
+        @{ Path = 'C:\Users\*\AppData\Local\Microsoft\Terminal Server Client\Cache\*';          AgeDays = 0;  Name = 'Terminal Server client cache' }
+        @{ Path = 'C:\Windows\minidump\*';                                                      AgeDays = 0;  Name = 'Minidump files' }
+        @{ Path = 'C:\Windows\Prefetch\*';                                                      AgeDays = 0;  Name = 'Prefetch' }
+    )
+    # Folders removed outright if present
+    FoldersToRemove    = @('C:\Config.Msi', 'C:\Intel', 'C:\Dell', 'C:\PerfLogs')
+    # Individual files removed outright if present
+    FilesToRemove      = @('C:\Windows\memory.dmp')
+}
+
+#endregion
+
+#region ========================= OUTPUT HELPERS ===============================
+
+function Get-ConsoleWidth {
+    try {
+        $w = $Host.UI.RawUI.WindowSize.Width
+        if ($w -ge 40) { return $w }
+    }
+    catch { }
+    return 100
+}
+
+function Write-BoxedText {
+    param(
+        [string]$Title,
+        [string[]]$Messages = @(),
+        [string]$ForegroundColor = 'White'
+    )
+    $lines = @($Messages | Where-Object { $null -ne $_ })
+    $maxLength = $Title.Length
+    foreach ($line in $lines) {
+        if ($line.Length -gt $maxLength) { $maxLength = $line.Length }
+    }
+    $consoleWidth = Get-ConsoleWidth
+    if ($maxLength -gt ($consoleWidth - 6)) { $maxLength = $consoleWidth - 6 }
+
+    $h = [string][char]0x2500
+    $horizontalLine = $h * ($maxLength + 2)
+    $leftPadding = ' ' * [Math]::Max(0, [Math]::Floor(($consoleWidth - ($maxLength + 4)) / 2))
+    $v = [char]0x2502
+
+    Write-Host ($leftPadding + [char]0x250C + $horizontalLine + [char]0x2510) -ForegroundColor $ForegroundColor
+    if ($Title) {
+        $t = if ($Title.Length -gt $maxLength) { $Title.Substring(0, $maxLength) } else { $Title }
+        Write-Host ($leftPadding + $v + ' ' + $t.PadRight($maxLength) + ' ' + $v) -ForegroundColor $ForegroundColor
+        if ($lines.Count -gt 0) {
+            Write-Host ($leftPadding + [char]0x251C + $horizontalLine + [char]0x2524) -ForegroundColor $ForegroundColor
+        }
+    }
+    foreach ($line in $lines) {
+        if ($line.Length -gt $maxLength) { $line = $line.Substring(0, $maxLength) }
+        Write-Host ($leftPadding + $v + ' ' + $line.PadRight($maxLength) + ' ' + $v) -ForegroundColor $ForegroundColor
+    }
+    Write-Host ($leftPadding + [char]0x2514 + $horizontalLine + [char]0x2518) -ForegroundColor $ForegroundColor
+}
+
+function Write-WarningBox { param([string]$Message) Write-BoxedText -Title '! WARNING' -Messages @($Message) -ForegroundColor Yellow }
+function Write-ErrorBox   { param([string]$Message) Write-BoxedText -Title 'X ERROR'   -Messages @($Message) -ForegroundColor Red }
+function Write-SuccessBox { param([string]$Message) Write-BoxedText -Title '+ SUCCESS' -Messages @($Message) -ForegroundColor Green }
+
+function Write-Log {
+    param(
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('Info', 'Warning', 'Error', 'Success')][string]$Level = 'Info'
+    )
+    $color = switch ($Level) {
+        'Warning' { 'Yellow' }
+        'Error'   { 'Red' }
+        'Success' { 'Green' }
+        default   { 'Gray' }
+    }
+    Write-Host ('[{0:HH:mm:ss}] {1}' -f (Get-Date), $Message) -ForegroundColor $color
+}
+
+function Invoke-Beep {
+    # All sounds are suppressed in unattended mode and tolerate hosts with no console
+    param([int]$Frequency = 800, [int]$Duration = 200)
+    if ($script:Unattended) { return }
+    try { [Console]::Beep($Frequency, $Duration) } catch { }
+}
+
+function Use-MissionImpossible {
+    if ($script:Unattended) { return }
+    foreach ($note in @(784, 784, 932, 1047, 784, 784)) {
+        Invoke-Beep -Frequency $note -Duration 150
+        Start-Sleep -Milliseconds 200
     }
 }
 
-# Create system restore point before making changes
+function Use-Mario {
+    if ($script:Unattended) { return }
+    foreach ($note in @(659, 659, 659, 523, 659, 784)) {
+        Invoke-Beep -Frequency $note -Duration 100
+        Start-Sleep -Milliseconds 150
+    }
+    Invoke-Beep -Frequency 395 -Duration 250
+}
+
+#endregion
+
+#region ====================== CONFIG FILE HANDLING ============================
+
+function Merge-Configuration {
+    <# Overlays FixWindows.config.json (if present) onto $Defaults, then applies
+       any explicitly supplied command-line parameters on top. #>
+    param([hashtable]$BaseConfig, [string]$Path)
+
+    $config = @{}
+    foreach ($key in $BaseConfig.Keys) { $config[$key] = $BaseConfig[$key] }
+
+    if ($Path -and (Test-Path -LiteralPath $Path)) {
+        Write-Log "Loading configuration overrides from $Path"
+        try {
+            $json = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+            foreach ($prop in $json.PSObject.Properties) {
+                switch ($prop.Name) {
+                    'IsoFiles' {
+                        # Merge per-key so a partial map only overrides what it names
+                        foreach ($isoProp in $prop.Value.PSObject.Properties) {
+                            $config.IsoFiles[$isoProp.Name] = [string]$isoProp.Value
+                        }
+                    }
+                    'CleanupPaths' {
+                        $paths = @()
+                        foreach ($item in $prop.Value) {
+                            $age = -1
+                            if ($item.PSObject.Properties.Name -contains 'AgeDays') { $age = [int]$item.AgeDays }
+                            $name = if ($item.PSObject.Properties.Name -contains 'Name') { [string]$item.Name } else { [string]$item.Path }
+                            $paths += @{ Path = [string]$item.Path; AgeDays = $age; Name = $name }
+                        }
+                        $config.CleanupPaths = $paths
+                    }
+                    default { $config[$prop.Name] = $prop.Value }
+                }
+            }
+        }
+        catch {
+            Write-Log "Config file could not be parsed, using defaults: $($_.Exception.Message)" -Level Warning
+        }
+    }
+    return $config
+}
+
+#endregion
+
+#region ====================== PLATFORM DETECTION ==============================
+
+function Get-PlatformInfo {
+    <# Detects the running OS and returns everything downstream phases need:
+       platform key (for the ISO map), edition name (for WIM index matching),
+       architecture, and whether this is Server Core. #>
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem
+    $build = [int]$os.BuildNumber
+    $caption = [string]$os.Caption
+    $isServer = ($os.ProductType -ne 1)   # 1=Workstation, 2=DC, 3=Server
+    $isCore = -not (Test-Path -LiteralPath (Join-Path $env:windir 'explorer.exe'))
+
+    $isArm64 = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64' -or $env:PROCESSOR_ARCHITEW6432 -eq 'ARM64' -or
+                "$($os.OSArchitecture)" -match 'ARM')
+
+    $key = $null
+    $displayName = $caption
+    if (-not $isServer) {
+        if ($build -ge 22000) {
+            if ($isArm64) { $key = 'WIN11_ARM64'; $displayName = 'Windows 11 ARM64' }
+            else          { $key = 'WIN11';       $displayName = 'Windows 11' }
+        }
+        elseif ($build -ge 10240) { $key = 'WIN10'; $displayName = 'Windows 10' }
+    }
+    else {
+        # Ordered so '2012 R2' is not shadowed by a plain '2012' match
+        $serverMap = [ordered]@{
+            '2012 R2' = 'SVR2012R2'
+            '2025'    = 'SVR2025'
+            '2022'    = 'SVR2022'
+            '2019'    = 'SVR2019'
+            '2016'    = 'SVR2016'
+        }
+        foreach ($pattern in $serverMap.Keys) {
+            if ($caption -match [regex]::Escape($pattern)) {
+                $key = $serverMap[$pattern]
+                $displayName = "Windows Server $pattern"
+                break
+            }
+        }
+    }
+
+    # Edition name as it appears inside the WIM, e.g. "Windows 11 Pro" or
+    # "Windows Server 2022 Standard"
+    $editionName = $caption -replace '^Microsoft\s+', ''
+
+    [pscustomobject]@{
+        Caption          = $caption
+        DisplayName      = $displayName
+        Build            = $build
+        IsServer         = $isServer
+        IsCore           = $isCore
+        IsArm64          = $isArm64
+        Key              = $key
+        EditionName      = $editionName
+        # Original script convention: index 2 for server Desktop Experience,
+        # otherwise 1. Used only if dynamic index resolution fails.
+        FallbackWimIndex = if ($isServer -and -not $isCore) { 2 } else { 1 }
+    }
+}
+
+function Resolve-WimIndex {
+    <# Given a mounted install.wim/install.esd, find the image index whose
+       edition matches the running OS instead of trusting a hardcoded number. #>
+    param(
+        [Parameter(Mandatory)][string]$ImagePath,
+        [Parameter(Mandatory)]$Platform
+    )
+    try {
+        $images = @(Get-WindowsImage -ImagePath $ImagePath -ErrorAction Stop)
+    }
+    catch {
+        Write-Log "Could not enumerate images in $ImagePath ($($_.Exception.Message)); using fallback index $($Platform.FallbackWimIndex)" -Level Warning
+        return $Platform.FallbackWimIndex
+    }
+
+    if ($images.Count -eq 1) { return [int]$images[0].ImageIndex }
+
+    # 1) Exact edition match, e.g. "Windows 11 Pro"
+    $match = $images | Where-Object { $_.ImageName -eq $Platform.EditionName } | Select-Object -First 1
+    if ($match) {
+        Write-Log "Matched edition '$($match.ImageName)' at index $($match.ImageIndex)"
+        return [int]$match.ImageIndex
+    }
+
+    # 2) Server: match base edition (Standard/Datacenter) + Core vs Desktop Experience
+    if ($Platform.IsServer) {
+        $baseEdition = $null
+        foreach ($ed in @('Datacenter', 'Standard', 'Essentials')) {
+            if ($Platform.EditionName -match $ed) { $baseEdition = $ed; break }
+        }
+        if ($baseEdition) {
+            $candidates = $images | Where-Object { $_.ImageName -match $baseEdition }
+            if ($Platform.IsCore) {
+                $match = $candidates | Where-Object { $_.ImageName -notmatch 'Desktop Experience' } | Select-Object -First 1
+            }
+            else {
+                $match = $candidates | Where-Object { $_.ImageName -match 'Desktop Experience' } | Select-Object -First 1
+            }
+            if ($match) {
+                Write-Log "Matched server edition '$($match.ImageName)' at index $($match.ImageIndex)"
+                return [int]$match.ImageIndex
+            }
+        }
+    }
+
+    # 3) Loose contains-match either direction
+    $match = $images | Where-Object {
+        $Platform.EditionName -like "*$($_.ImageName)*" -or $_.ImageName -like "*$($Platform.EditionName)*"
+    } | Select-Object -First 1
+    if ($match) {
+        Write-Log "Loosely matched edition '$($match.ImageName)' at index $($match.ImageIndex)"
+        return [int]$match.ImageIndex
+    }
+
+    Write-Log "No edition in the ISO matched '$($Platform.EditionName)'; using fallback index $($Platform.FallbackWimIndex)" -Level Warning
+    return $Platform.FallbackWimIndex
+}
+
+#endregion
+
+#region ==================== NETWORK SHARE / ISO SYNC ==========================
+
+function Test-ShareAccess {
+    param([string]$NetworkPath, [pscredential]$Credential)
+    try {
+        if ($Credential) {
+            $null = New-PSDrive -Name 'FIXWTEST' -PSProvider FileSystem -Root $NetworkPath -Credential $Credential -ErrorAction Stop
+            Remove-PSDrive -Name 'FIXWTEST' -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            $null = Get-ChildItem -LiteralPath $NetworkPath -ErrorAction Stop | Select-Object -First 1
+        }
+        return $true
+    }
+    catch { return $false }
+}
+
+function Get-ShareCredential {
+    <# Returns $null when the share is reachable anonymously / with current
+       identity, a PSCredential when one is needed, or throws when access
+       cannot be established. Credentials are cached DPAPI-encrypted per user. #>
+    param([string]$NetworkPath, [string]$CredentialPath)
+
+    if (Test-ShareAccess -NetworkPath $NetworkPath) {
+        Write-Log 'Network share accessible with current credentials'
+        return $null
+    }
+
+    if (Test-Path -LiteralPath $CredentialPath) {
+        Write-Log 'Trying stored network credentials...'
+        try {
+            $stored = Import-Clixml -LiteralPath $CredentialPath
+            if (Test-ShareAccess -NetworkPath $NetworkPath -Credential $stored) {
+                Write-Log 'Stored credentials accepted' -Level Success
+                return $stored
+            }
+        }
+        catch { }
+        Write-Log 'Stored credentials rejected, removing them' -Level Warning
+        Remove-Item -LiteralPath $CredentialPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($script:Unattended) {
+        throw "Share $NetworkPath requires credentials and none are stored (unattended mode - not prompting)."
+    }
+
+    $cred = Get-Credential -Message "Enter credentials for $NetworkPath"
+    if (-not $cred) { throw "No credentials provided for $NetworkPath." }
+    if (-not (Test-ShareAccess -NetworkPath $NetworkPath -Credential $cred)) {
+        throw "Provided credentials were rejected by $NetworkPath."
+    }
+    $cred | Export-Clixml -LiteralPath $CredentialPath
+    Write-Log "Credentials verified and cached (DPAPI-encrypted) at $CredentialPath" -Level Success
+    return $cred
+}
+
+function Sync-LocalIso {
+    <# Ensures an up-to-date copy of the ISO exists locally. Re-copies only
+       when the source file's size or timestamp differs, so re-runs are fast
+       and a refreshed ISO on the NAS is picked up automatically. #>
+    param(
+        [Parameter(Mandatory)][string]$SourceFolder,
+        [Parameter(Mandatory)][string]$IsoFileName,
+        [Parameter(Mandatory)][string]$DestinationFolder,
+        [Parameter(Mandatory)][string]$CredentialPath
+    )
+    $localIso = Join-Path $DestinationFolder $IsoFileName
+    $sourceIso = Join-Path $SourceFolder $IsoFileName
+    $localExists = Test-Path -LiteralPath $localIso
+
+    # Quick reachability probe so an offline NAS doesn't hang the run
+    $sourceReachable = $true
+    if ($SourceFolder -match '^\\\\([^\\]+)') {
+        $shareHost = $Matches[1]
+        $sourceReachable = Test-Connection -ComputerName $shareHost -Count 1 -Quiet -ErrorAction SilentlyContinue
+        if (-not $sourceReachable) { Write-Log "ISO source host $shareHost is not responding to ping" -Level Warning }
+    }
+
+    if (-not $sourceReachable) {
+        if ($localExists) {
+            Write-Log 'Using existing local ISO (source unreachable)' -Level Warning
+            return $localIso
+        }
+        throw "ISO source $SourceFolder is unreachable and no local copy exists at $localIso."
+    }
+
+    $credential = $null
+    if ($SourceFolder -like '\\*') {
+        try {
+            $shareRoot = ($SourceFolder -split '\\')[0..3] -join '\'   # \\host\share
+            $credential = Get-ShareCredential -NetworkPath $shareRoot -CredentialPath $CredentialPath
+        }
+        catch {
+            if ($localExists) {
+                Write-Log "Could not authenticate to share ($($_.Exception.Message)); using existing local ISO" -Level Warning
+                return $localIso
+            }
+            throw
+        }
+    }
+
+    $driveMapped = $false
+    try {
+        if ($credential) {
+            $null = New-PSDrive -Name 'FIXWISO' -PSProvider FileSystem -Root $SourceFolder -Credential $credential -ErrorAction Stop
+            $driveMapped = $true
+            $sourceIso = 'FIXWISO:\' + $IsoFileName
+        }
+
+        if (-not (Test-Path -LiteralPath $sourceIso)) {
+            if ($localExists) {
+                Write-Log "ISO $IsoFileName not found on source; using existing local copy" -Level Warning
+                return $localIso
+            }
+            throw "ISO $IsoFileName was not found at $SourceFolder."
+        }
+
+        $sourceItem = Get-Item -LiteralPath $sourceIso
+        $needCopy = $true
+        if ($localExists) {
+            $localItem = Get-Item -LiteralPath $localIso
+            if ($localItem.Length -eq $sourceItem.Length -and $localItem.LastWriteTimeUtc -ge $sourceItem.LastWriteTimeUtc) {
+                $needCopy = $false
+            }
+        }
+
+        if ($needCopy) {
+            $sizeGB = '{0:N2}' -f ($sourceItem.Length / 1GB)
+            Write-BoxedText -Title 'ISO DOWNLOAD' -Messages @(
+                "Copying $IsoFileName ($sizeGB GB) from",
+                $SourceFolder,
+                "to $DestinationFolder ..."
+            ) -ForegroundColor DarkYellow
+            Copy-Item -LiteralPath $sourceIso -Destination $localIso -Force
+            Write-Log "ISO copied to $localIso" -Level Success
+        }
+        else {
+            Write-Log "Local ISO $localIso is current (size and timestamp match the source)" -Level Success
+        }
+        return $localIso
+    }
+    finally {
+        if ($driveMapped) { Remove-PSDrive -Name 'FIXWISO' -Force -ErrorAction SilentlyContinue }
+    }
+}
+
+#endregion
+
+#region ========================= MAINTENANCE PHASES ===========================
+
+function Invoke-HealthCheck {
+    param(
+        [Parameter(Mandatory)][string]$IsoPath,
+        [Parameter(Mandatory)]$Platform
+    )
+    Write-BoxedText -Title 'WINDOWS HEALTH CHECK' -Messages @(
+        'DISM + SFC repairs sourced from the local ISO.',
+        'This will take quite a while - please be patient.'
+    ) -ForegroundColor White
+
+    if ($WhatIfPreference) {
+        Write-Log 'WhatIf: would run DISM ScanHealth/CheckHealth/RestoreHealth and SFC /scannow'
+        return
+    }
+
+    Write-Log 'DISM: ScanHealth'
+    & dism.exe /Online /Cleanup-Image /ScanHealth
+    Write-Log 'DISM: CheckHealth'
+    & dism.exe /Online /Cleanup-Image /CheckHealth
+
+    Write-Log "Mounting $IsoPath"
+    $mounted = $false
+    try {
+        $null = Mount-DiskImage -ImagePath $IsoPath -PassThru
+        $mounted = $true
+        $driveLetter = (Get-DiskImage -ImagePath $IsoPath | Get-Volume).DriveLetter
+        if (-not $driveLetter) { throw 'ISO mounted but no drive letter was assigned.' }
+        $mountRoot = "${driveLetter}:"
+        Write-Log "ISO mounted as $mountRoot" -Level Success
+
+        # Modern media may ship install.esd instead of install.wim
+        $installImage = $null
+        $sourceType = $null
+        foreach ($candidate in @(@{File = 'install.wim'; Type = 'WIM' }, @{File = 'install.esd'; Type = 'ESD' })) {
+            $p = Join-Path "$mountRoot\sources" $candidate.File
+            if (Test-Path -LiteralPath $p) { $installImage = $p; $sourceType = $candidate.Type; break }
+        }
+        if (-not $installImage) { throw "Neither install.wim nor install.esd found under $mountRoot\sources." }
+
+        $index = Resolve-WimIndex -ImagePath $installImage -Platform $Platform
+        Write-Log "DISM: RestoreHealth from ${sourceType}:${installImage}:$index"
+        & dism.exe /Online /Cleanup-Image /RestoreHealth /Source:"${sourceType}:${installImage}:$index" /LimitAccess
+        if ($LASTEXITCODE -ne 0) { Write-Log "DISM RestoreHealth exit code: $LASTEXITCODE" -Level Warning }
+    }
+    finally {
+        if ($mounted) {
+            Write-Log 'Dismounting ISO'
+            Dismount-DiskImage -ImagePath $IsoPath -ErrorAction SilentlyContinue | Out-Null
+        }
+    }
+
+    Write-Log 'Running System File Checker (sfc /scannow)'
+    & "$env:windir\System32\sfc.exe" /scannow
+}
+
+function Invoke-VolumeRepair {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param()
+    $volumes = @(Get-Volume | Where-Object {
+            $_.DriveLetter -and $_.DriveType -eq 'Fixed' -and "$($_.FileSystemType)" -match 'NTFS|ReFS'
+        })
+    if ($volumes.Count -eq 0) { Write-Log 'No fixed volumes found to repair' -Level Warning; return }
+
+    $letters = ($volumes | ForEach-Object { $_.DriveLetter }) -join ''
+    Write-BoxedText -Title 'VOLUME REPAIR' -Messages @("Repairing volume(s): $letters") -ForegroundColor White
+
+    foreach ($volume in $volumes) {
+        if (-not $PSCmdlet.ShouldProcess("Volume $($volume.DriveLetter):", 'Repair-Volume -OfflineScanAndFix')) { continue }
+        try {
+            Write-Log "Repair-Volume $($volume.DriveLetter): (offline scan and fix - system volume repairs run at next boot)"
+            Repair-Volume -DriveLetter $volume.DriveLetter -OfflineScanAndFix -ErrorAction Stop
+        }
+        catch {
+            Write-Log "Repair-Volume $($volume.DriveLetter): failed: $($_.Exception.Message)" -Level Warning
+        }
+    }
+}
+
+function Backup-AndClearEventLogs {
+    param([Parameter(Mandatory)][string]$BackupRoot)
+    $backupFolder = Join-Path $BackupRoot (Get-Date -Format 'MMMM-dd')
+    $logNames = @(Get-WinEvent -ListLog * -ErrorAction SilentlyContinue |
+        Where-Object { $_.RecordCount -gt 0 } | ForEach-Object { $_.LogName })
+    Write-Log "Archiving $($logNames.Count) event logs to $backupFolder"
+
+    if ($WhatIfPreference) { Write-Log 'WhatIf: would export and clear all event logs'; return }
+
+    if (-not (Test-Path -LiteralPath $backupFolder)) {
+        New-Item -Path $backupFolder -ItemType Directory -Force | Out-Null
+    }
+    $failed = 0
+    foreach ($log in $logNames) {
+        $exportPath = Join-Path $backupFolder (($log -replace '[/\\]', '_') + '.evtx')
+        & wevtutil.exe epl "$log" "$exportPath" /ow:true 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            & wevtutil.exe cl "$log" 2>$null
+            if ($LASTEXITCODE -ne 0) { $failed++ }
+        }
+        else { $failed++ }
+    }
+    if ($failed -gt 0) { Write-Log "$failed log(s) could not be exported/cleared (typically in-use debug channels)" -Level Warning }
+    Write-Log "Event logs archived to $backupFolder" -Level Success
+}
+
+function Remove-OldItems {
+    <# Deletes the contents matched by a (wildcard) path, optionally keeping
+       anything newer than the age threshold. #>
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [int]$AgeDays = 0,
+        [string]$Name = ''
+    )
+    if (-not $Name) { $Name = $Path }
+    if (-not (Test-Path -Path $Path -ErrorAction SilentlyContinue)) {
+        Write-Log "SKIP  $Name (path not present)"
+        return
+    }
+    Write-Log "CLEAN $Name"
+    $items = @(Get-ChildItem -Path $Path -Recurse -Force -ErrorAction SilentlyContinue)
+    if ($AgeDays -gt 0) {
+        $cutoff = (Get-Date).AddDays(-$AgeDays)
+        $items = @($items | Where-Object { $_.CreationTime -lt $cutoff -and $_.LastWriteTime -lt $cutoff })
+    }
+    # Delete leaf-first so directories are empty by the time they are removed
+    $items |
+        Sort-Object { $_.FullName.Length } -Descending |
+        Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+}
+
+function Invoke-FileCleanup {
+    param([Parameter(Mandatory)][hashtable]$Config)
+
+    # -- Windows Update cache (service must be stopped while its folder is purged)
+    Write-Log 'Stopping Windows Update services (wuauserv, bits)'
+    if (-not $WhatIfPreference) {
+        Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+        Stop-Service -Name bits -Force -ErrorAction SilentlyContinue
+    }
+    try {
+        Remove-OldItems -Path "$env:windir\SoftwareDistribution\*" -AgeDays 0 -Name 'Windows Update cache (SoftwareDistribution)'
+    }
+    finally {
+        if (-not $WhatIfPreference) {
+            Start-Service -Name bits -ErrorAction SilentlyContinue
+            Start-Service -Name wuauserv -ErrorAction SilentlyContinue
+        }
+    }
+
+    # -- Table-driven path cleanup
+    foreach ($entry in $Config.CleanupPaths) {
+        $age = [int]$entry.AgeDays
+        if ($age -lt 0) { $age = [int]$Config.DaysToDelete }
+        Remove-OldItems -Path $entry.Path -AgeDays $age -Name $entry.Name
+    }
+
+    # -- IIS logs (only when IIS is present)
+    if (Test-Path -LiteralPath 'C:\inetpub\logs\LogFiles') {
+        Remove-OldItems -Path 'C:\inetpub\logs\LogFiles\*' -AgeDays ([int]$Config.IisLogAgeDays) -Name "IIS logs older than $($Config.IisLogAgeDays) days"
+    }
+
+    # -- Vendor/stray folders removed outright
+    foreach ($folder in $Config.FoldersToRemove) {
+        if (Test-Path -LiteralPath $folder) {
+            Write-Log "CLEAN Removing folder $folder"
+            Remove-Item -LiteralPath $folder -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        else { Write-Log "SKIP  $folder (not present)" }
+    }
+    foreach ($file in $Config.FilesToRemove) {
+        if (Test-Path -LiteralPath $file) {
+            Write-Log "CLEAN Removing file $file"
+            Remove-Item -LiteralPath $file -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    # -- Recycle bin (Clear-RecycleBin handles all fixed drives)
+    Write-Log 'CLEAN Emptying recycle bin'
+    if (-not $WhatIfPreference) {
+        try { Clear-RecycleBin -Force -ErrorAction Stop }
+        catch { Write-Log "Clear-RecycleBin: $($_.Exception.Message)" -Level Warning }
+    }
+
+    # -- Shadow copies (opt-in: also destroys System Restore points)
+    if ($Config.DeleteShadowCopies) {
+        Write-Log 'CLEAN Deleting all shadow copies (vssadmin) - this removes restore points' -Level Warning
+        if (-not $WhatIfPreference) { & vssadmin.exe Delete Shadows /All /Quiet | Out-Null }
+    }
+    else {
+        Write-Log 'SKIP  Shadow copy deletion (DeleteShadowCopies is false in config)'
+    }
+}
+
+function Invoke-ProfileCleanup {
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param([Parameter(Mandatory)][int]$AgeDays)
+    Write-Log "Looking for user profiles unused for more than $AgeDays days..."
+    $cutoff = (Get-Date).AddDays(-$AgeDays)
+    $stale = @(Get-CimInstance -ClassName Win32_UserProfile -ErrorAction Stop | Where-Object {
+            (-not $_.Special) -and
+            (-not $_.Loaded) -and
+            ($_.SID -notmatch '-500$') -and
+            ($_.LastUseTime) -and
+            ($_.LastUseTime -lt $cutoff)
+        })
+    if ($stale.Count -eq 0) { Write-Log 'No stale profiles found' -Level Success; return }
+
+    foreach ($profileEntry in $stale) {
+        if (-not $PSCmdlet.ShouldProcess($profileEntry.LocalPath, 'Remove user profile')) { continue }
+        Write-Log "Removing profile: $($profileEntry.LocalPath) (last used $($profileEntry.LastUseTime))" -Level Warning
+        try {
+            $profileEntry | Remove-CimInstance -ErrorAction Stop
+            Write-Log "Removed $($profileEntry.LocalPath)" -Level Success
+        }
+        catch {
+            Write-Log "Failed to remove $($profileEntry.LocalPath): $($_.Exception.Message)" -Level Warning
+        }
+    }
+}
+
+function Invoke-WindowsUpdatePhase {
+    if ($WhatIfPreference) { Write-Log 'WhatIf: would search for and install Windows Updates'; return }
+
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+
+    # Preferred path: PSWindowsUpdate module (richer output, handles reboot flags)
+    $psWindowsUpdateReady = $false
+    try {
+        if (-not (Get-Module -ListAvailable -Name PSWindowsUpdate)) {
+            Write-Log 'Installing PSWindowsUpdate module from PSGallery...'
+            if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Confirm:$false | Out-Null
+            }
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue
+            Install-Module -Name PSWindowsUpdate -Force -Confirm:$false -Scope AllUsers -ErrorAction Stop
+        }
+        Import-Module PSWindowsUpdate -Force -ErrorAction Stop
+        $psWindowsUpdateReady = $true
+    }
+    catch {
+        Write-Log "PSWindowsUpdate unavailable ($($_.Exception.Message)); falling back to Windows Update COM API" -Level Warning
+    }
+
+    if ($psWindowsUpdateReady) {
+        try {
+            Get-WindowsUpdate -ErrorAction Stop | Out-Host
+            # -IgnoreReboot: this script controls the reboot itself at the end
+            Install-WindowsUpdate -AcceptAll -IgnoreReboot -Confirm:$false -ErrorAction Stop | Out-Host
+            return
+        }
+        catch {
+            Write-Log "PSWindowsUpdate failed ($($_.Exception.Message)); falling back to COM API" -Level Warning
+        }
+    }
+
+    # Fallback: built-in Windows Update Agent COM API (works on every supported OS)
+    $session = New-Object -ComObject Microsoft.Update.Session
+    $searcher = $session.CreateUpdateSearcher()
+    Write-Log 'Searching for available updates (COM)...'
+    $result = $searcher.Search("IsInstalled=0 and IsHidden=0 and Type='Software'")
+    if ($result.Updates.Count -eq 0) { Write-Log 'No updates available' -Level Success; return }
+
+    Write-Log "Found $($result.Updates.Count) update(s):"
+    $toInstall = New-Object -ComObject Microsoft.Update.UpdateColl
+    foreach ($update in $result.Updates) {
+        Write-Host "  - $($update.Title)" -ForegroundColor Cyan
+        if (-not $update.EulaAccepted) { $update.AcceptEula() | Out-Null }
+        $null = $toInstall.Add($update)
+    }
+
+    Write-Log 'Downloading updates...'
+    $downloader = $session.CreateUpdateDownloader()
+    $downloader.Updates = $toInstall
+    $null = $downloader.Download()
+
+    Write-Log 'Installing updates...'
+    $installer = $session.CreateUpdateInstaller()
+    $installer.Updates = $toInstall
+    $installResult = $installer.Install()
+    if ($installResult.ResultCode -eq 2) {
+        Write-Log 'Updates installed successfully' -Level Success
+        if ($installResult.RebootRequired) { Write-Log 'A reboot is required to complete installation' -Level Warning }
+    }
+    else {
+        Write-Log "Update installation finished with result code $($installResult.ResultCode)" -Level Warning
+    }
+}
+
+function Invoke-CleanMgr {
+    $cleanMgrExe = Join-Path $env:windir 'System32\cleanmgr.exe'
+    if (-not (Test-Path -LiteralPath $cleanMgrExe)) {
+        Write-Log 'cleanmgr.exe not present (Server Core / feature removed) - skipping' -Level Warning
+        return
+    }
+    if ($WhatIfPreference) { Write-Log 'WhatIf: would configure and run CleanMgr /sagerun:1'; return }
+
+    # Enable every available cleanup handler for sageset profile 1, EXCEPT the
+    # Downloads folder handler - that one deletes the user's Downloads content.
+    $volumeCachesKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\VolumeCaches'
+    $handlers = @(Get-ChildItem -Path $volumeCachesKey -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSChildName -ne 'DownloadsFolder' })
+    foreach ($handler in $handlers) {
+        Set-ItemProperty -Path $handler.PSPath -Name 'StateFlags0001' -Value 2 -Type DWord -ErrorAction SilentlyContinue
+    }
+    Write-Log "CleanMgr configured with $($handlers.Count) cleanup handlers (Downloads folder excluded)"
+
+    Write-Log 'Running CleanMgr (this can take a while)...'
+    $process = Start-Process -FilePath $cleanMgrExe -ArgumentList '/sagerun:1' -Wait -PassThru
+    Write-Log "CleanMgr finished with exit code $($process.ExitCode)" -Level Success
+}
+
 function New-MaintenanceRestorePoint {
     try {
-        Write-LogMessage "Creating system restore point"
-        Checkpoint-Computer -Description "Before Windows Maintenance Script" -RestorePointType "MODIFY_SETTINGS"
-        return $true
+        # Checkpoint-Computer exists on client SKUs only
+        if (-not (Get-Command Checkpoint-Computer -ErrorAction SilentlyContinue)) {
+            Write-Log 'System Restore not available on this SKU (server) - skipping restore point'
+            return
+        }
+        if ($WhatIfPreference) { Write-Log 'WhatIf: would create a system restore point'; return }
+        # Lift the default 24h restore-point throttle for this run
+        $srKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'
+        Set-ItemProperty -Path $srKey -Name 'SystemRestorePointCreationFrequency' -Value 0 -Type DWord -ErrorAction SilentlyContinue
+        Checkpoint-Computer -Description 'Before FixWindows maintenance' -RestorePointType MODIFY_SETTINGS -ErrorAction Stop
+        Write-Log 'System restore point created' -Level Success
     }
     catch {
-        Write-LogMessage "Failed to create restore point: $_" -Level Error
-        return $false
+        Write-Log "Could not create restore point: $($_.Exception.Message)" -Level Warning
     }
 }
 
-# Example usage:
-Write-BoxedText -Title "WINDOWS HEALTH CHECK" -Messages @(
-    "THIS WILL TAKE QUITE A",
-    "BIT. PLEASE BE PATIENT."
-) -ForegroundColor White
-
-Write-Host ""
-
-Write-BoxedText -Title "DISM HEALTH SCAN" -ForegroundColor White
-Dism /online /cleanup-image /scanhealth
-
-Write-Host ""
-
-Write-BoxedText -Title "HEALTH DETERMINATION" -ForegroundColor White
-dism /online /cleanup-image /checkhealth
-
-Write-Host ""
-
-Write-BoxedText -Title "APPLYING HEALTH FIXES" -ForegroundColor White
-
-Write-Host ""
-
-Write-BoxedText -Title "MOUNTING WINDOWS IMAGE" -ForegroundColor White
-Mount-DiskImage -ImagePath $DestinationISO
-$Disk = ((Get-DiskImage $DestinationISO | Get-Volume).DriveLetter)
-$Disk = $Disk + ':'
-
-Write-BoxedText -Title "DISK ISO MOUNTED" -Messages @(
-    "AS DRIVE LETTER $DISK"
-) -ForegroundColor White
-
-Write-Host ""
-
-Write-BoxedText -Title "PERFORMING REPAIRS" -ForegroundColor White
-dism /online /cleanup-image /restorehealth /source:WIM:$Disk\sources\install.wim:$WimVal /limitaccess
-
-Write-Host ""
-
-Write-BoxedText -Title "DISMOUNTING WINDOWS IMAGE" -ForegroundColor White
-Dismount-DiskImage -ImagePath $DestinationISO
-
-# System File Check section
-Write-BoxedText -Title "RUNNING SYSTEM FILE CHECK" -ForegroundColor White
-sfc /scannow
-
-Write-Host ""
-
-Write-BoxedText -Title "RUN VOLUME REPAIR" -Messages @(
-    "REPAIRING VOLUME(S) $ExistingDrives"
-) -ForegroundColor White
-
-# Cleaning Process Section
-Write-BoxedText -Title "STARTING THE ACTUAL CLEANING PROCESSES" -ForegroundColor DarkGreen
-
-Write-Host ""
-
-Write-BoxedText -Title "ARCHIVE EVENT LOGS" -ForegroundColor DarkGreen
-
-# Windows Update Section
-Write-BoxedText -Title "STARTING WINDOWS UPDATE" -Messages @(
-    "CLEANUP ROUTINES"
-) -ForegroundColor DarkGreen
-
-Write-Host ""
-
-Write-BoxedText -Title "STOPPING WIN UPDATE SVC" -ForegroundColor DarkGreen
-
-# For warning messages, you can use a different style
-function Write-WarningBox {
-    param(
-        [string]$Message
-    )
-    Write-BoxedText -Title "! WARNING" -Messages @($Message) -ForegroundColor Yellow
+function Get-DiskUsageReport {
+    Get-CimInstance -ClassName Win32_LogicalDisk -Filter 'DriveType=3' |
+        Select-Object @{Name = 'Drive'; Expression = { $_.DeviceID } },
+        @{Name = 'Size (GB)'; Expression = { '{0:N1}' -f ($_.Size / 1GB) } },
+        @{Name = 'Free (GB)'; Expression = { '{0:N1}' -f ($_.FreeSpace / 1GB) } },
+        @{Name = 'Free %'; Expression = { '{0:P1}' -f ($_.FreeSpace / $_.Size) } } |
+        Format-Table -AutoSize | Out-String
 }
 
-# For error messages
-function Write-ErrorBox {
+#endregion
+
+#region ============================ MAIN =====================================
+
+$script:Unattended = [bool]$Unattended
+$StartTime = Get-Date
+$PhaseResults = New-Object System.Collections.ArrayList
+
+function Invoke-Phase {
+    <# Runs one maintenance phase; a failure is logged and recorded but never
+       kills the rest of the run. #>
     param(
-        [string]$Message
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action,
+        [switch]$Skip
     )
-    Write-BoxedText -Title "X ERROR" -Messages @($Message) -ForegroundColor Red
+    if ($Skip) {
+        Write-Log "Phase skipped: $Name" -Level Warning
+        $null = $PhaseResults.Add([pscustomobject]@{ Phase = $Name; Status = 'Skipped'; Duration = '-' })
+        return
+    }
+    Write-Host ''
+    Write-BoxedText -Title ("PHASE: " + $Name.ToUpper()) -ForegroundColor DarkGreen
+    $phaseStart = Get-Date
+    try {
+        & $Action
+        $status = 'OK'
+    }
+    catch {
+        Write-ErrorBox "$Name failed: $($_.Exception.Message)"
+        $status = 'FAILED'
+    }
+    $elapsed = (Get-Date) - $phaseStart
+    $null = $PhaseResults.Add([pscustomobject]@{
+            Phase    = $Name
+            Status   = $status
+            Duration = ('{0:mm\:ss}' -f $elapsed)
+        })
 }
 
-# For success messages
-function Write-SuccessBox {
-    param(
-        [string]$Message
-    )
-    Write-BoxedText -Title "√ SUCCESS" -Messages @($Message) -ForegroundColor Green
+# ---- Configuration -----------------------------------------------------------
+if (-not $ConfigPath) { $ConfigPath = Join-Path $PSScriptRoot 'FixWindows.config.json' }
+$Config = Merge-Configuration -BaseConfig $Defaults -Path $ConfigPath
+
+# Explicit command-line parameters beat the config file
+if ($PSBoundParameters.ContainsKey('DaysToDelete')) { $Config.DaysToDelete = $DaysToDelete }
+if ($PSBoundParameters.ContainsKey('ProfileAge')) { $Config.ProfileAge = $ProfileAge }
+if ($PSBoundParameters.ContainsKey('ISOSourcePath')) { $Config.IsoSourcePath = $ISOSourcePath }
+
+$WorkFolder = [string]$Config.WorkFolder
+$LogFile = Join-Path $WorkFolder ('Clean-{0}.log' -f (Get-Date -Format 'MM-d-yy'))
+$CredentialPath = Join-Path $env:USERPROFILE 'FixWindows-Credentials.xml'
+
+# Work folder must exist BEFORE the transcript starts
+if (-not (Test-Path -LiteralPath $WorkFolder)) {
+    New-Item -Path $WorkFolder -ItemType Directory -Force | Out-Null
 }
+try { Stop-Transcript -ErrorAction SilentlyContinue | Out-Null } catch { }
+Start-Transcript -Path $LogFile -Append | Out-Null
 
-# Example usage for status messages:
-Write-SuccessBox "The Contents of Windows SoftwareDistribution have been removed successfully!"
-
-# For the final completion message
-Write-BoxedText -Title "SCRIPT COMPLETION" -Messages @(
-    "DAVID'S SCRIPT HAS",
-    "EXECUTED SUCCESSFULLY!"
-) -ForegroundColor Green
-
-Write-BoxedText -Title "SYSTEM REBOOT" -Messages @(
-    "REBOOTING SYSTEM NOW!",
-    "BOOT TIME REPAIR WILL OCCUR NOW!",
-    "IT WILL TAKE A WHILE TO BOOT AS THE",
-    "FILE SYSTEM PERFORMS A CHECK!",
-    "DO NOT RESET!!!"
-) -ForegroundColor Red
-
-Write-BoxedText -Title "SYSTEM DETECTION" -Messages @(
-    "Windows 11 detected with Build Number: $($OSVersion.Build)",
-    "Using ISO: $ISO",
-    "WIM Value: $WimVal",
-    "Script is running elevated."
-) -ForegroundColor White
-Write-Host ""
-
-# Get system information safely
+$exitCode = 0
 try {
-    $OSVersion = Get-CimInstance Win32_OperatingSystem
-    $BuildNumber = $OSVersion.BuildNumber
+    Clear-Host
 
-    # Create messages array with basic information
-    $messages = @(
-        "Windows Build: $BuildNumber"
-    )
-
-    # Add ISO information if available
-    if ($SourceISO) {
-        $messages += "ISO Source: $SourceISO"
-    } else {
-        $messages += "ISO Source: Not yet defined"
+    # ---- Platform detection ---------------------------------------------------
+    $Platform = Get-PlatformInfo
+    if (-not $Platform.Key) {
+        Write-ErrorBox "Unsupported OS: $($Platform.Caption) (build $($Platform.Build))"
+        throw "Unable to map this operating system to a known platform key."
+    }
+    $IsoFileName = [string]$Config.IsoFiles[$Platform.Key]
+    if (-not $IsoFileName) {
+        throw "No ISO configured for platform key '$($Platform.Key)' - add it to FixWindows.config.json."
     }
 
-    # Create and display the system information box
-    Write-BoxedText -Title "SYSTEM INFORMATION" -Messages $messages -ForegroundColor White
+    Write-BoxedText -Title 'SYSTEM MAINTENANCE' -Messages @(
+        'WINDOWS PowerShell Maintenance and Cleanup Routines',
+        '(C) 2022-2026 David Andrews'
+    ) -ForegroundColor White
+
+    $archLabel = if ($Platform.IsArm64) { 'ARM64' } else { 'x64' }
+    Write-BoxedText -Title 'SYSTEM DETECTION' -Messages @(
+        "Detected:     $($Platform.DisplayName) (build $($Platform.Build))",
+        "Edition:      $($Platform.EditionName)",
+        "Architecture: $archLabel$(if ($Platform.IsCore) { '  (Server Core)' })",
+        "Host:         $env:COMPUTERNAME",
+        "ISO file:     $IsoFileName",
+        "ISO source:   $($Config.IsoSourcePath)",
+        "Log file:     $LogFile"
+    ) -ForegroundColor Green
+
+    Use-MissionImpossible
+
+    # ---- Abort window (interactive runs only) ---------------------------------
+    if (-not $script:Unattended) {
+        Write-Host ''
+        Write-Host '  Press CTRL-C within 15 seconds to abort...' -BackgroundColor Red -ForegroundColor Yellow
+        for ($i = 15; $i -ge 1; $i--) {
+            Write-Progress -Activity 'Starting maintenance' -Status "Time remaining: $i seconds (CTRL-C to abort)" -PercentComplete ((15 - $i) / 15 * 100)
+            Start-Sleep -Seconds 1
+        }
+        Write-Progress -Activity 'Starting maintenance' -Completed
+    }
+
+    # ---- Phases ----------------------------------------------------------------
+    if ($Config.CreateRestorePoint) {
+        Invoke-Phase -Name 'Restore point' -Action { New-MaintenanceRestorePoint }
+    }
+
+    $BeforeUsage = Get-DiskUsageReport
+
+    Invoke-Phase -Name 'System health check (DISM + SFC)' -Skip:$SkipHealthCheck -Action {
+        $localIso = Sync-LocalIso -SourceFolder $Config.IsoSourcePath -IsoFileName $IsoFileName `
+            -DestinationFolder $WorkFolder -CredentialPath $CredentialPath
+        Invoke-HealthCheck -IsoPath $localIso -Platform $Platform
+    }
+
+    Invoke-Phase -Name 'Volume repair' -Skip:$SkipHealthCheck -Action { Invoke-VolumeRepair }
+
+    Invoke-Phase -Name 'Event log archive and clear' -Action {
+        Backup-AndClearEventLogs -BackupRoot ([string]$Config.EventLogBackupRoot)
+    }
+
+    Invoke-Phase -Name 'File cleanup' -Action { Invoke-FileCleanup -Config $Config }
+
+    Invoke-Phase -Name "User profile cleanup (>$($Config.ProfileAge) days)" -Action {
+        Invoke-ProfileCleanup -AgeDays ([int]$Config.ProfileAge)
+    }
+
+    Invoke-Phase -Name 'Windows Update' -Skip:$SkipWindowsUpdate -Action { Invoke-WindowsUpdatePhase }
+
+    Invoke-Phase -Name 'Disk Cleanup (CleanMgr)' -Action { Invoke-CleanMgr }
+
+    # ---- Summary ---------------------------------------------------------------
+    $AfterUsage = Get-DiskUsageReport
+    $EndTime = Get-Date
+    $totalElapsed = $EndTime - $StartTime
+
+    Write-Host ''
+    Write-BoxedText -Title 'JOB SUMMARY' -Messages @("Machine: $env:COMPUTERNAME") -ForegroundColor White
+    $PhaseResults | Format-Table -AutoSize | Out-String | Write-Host
+
+    Write-BoxedText -Title 'DISK USAGE BEFORE' -ForegroundColor DarkYellow
+    Write-Host $BeforeUsage -ForegroundColor DarkYellow
+    Write-BoxedText -Title 'DISK USAGE AFTER' -ForegroundColor White
+    Write-Host $AfterUsage -ForegroundColor Green
+
+    Write-Log ('Total execution time: {0} minutes {1} seconds' -f [int]$totalElapsed.TotalMinutes, $totalElapsed.Seconds) -Level Success
+
+    if (@($PhaseResults | Where-Object { $_.Status -eq 'FAILED' }).Count -gt 0) {
+        $exitCode = 2
+        Write-WarningBox 'One or more phases failed - review the log above.'
+    }
+    else {
+        Write-SuccessBox 'ALL MAINTENANCE PHASES COMPLETED SUCCESSFULLY!'
+        Use-Mario
+    }
 }
 catch {
-    Write-Host "Error getting system information: $($_.Exception.Message)" -ForegroundColor Red
+    Write-ErrorBox "Fatal error: $($_.Exception.Message)"
+    Write-Log $_.ScriptStackTrace -Level Error
+    $exitCode = 1
+}
+finally {
+    try { Stop-Transcript | Out-Null } catch { }
 }
 
-# Safely get WIM value
-$WimValDisplay = if ($WimVal) {
-    $WimVal
-} else {
-    "not defined"
+# ---- Restart -------------------------------------------------------------------
+if ($exitCode -ne 1 -and -not $NoRestart -and -not $WhatIfPreference) {
+    Write-BoxedText -Title 'SYSTEM REBOOT' -Messages @(
+        'REBOOTING SYSTEM NOW!',
+        'Boot-time volume repair will run during startup.',
+        'The first boot may take a while - DO NOT RESET!'
+    ) -ForegroundColor Red
+    if (-not $script:Unattended) {
+        for ($i = 1; $i -le 5; $i++) { Invoke-Beep -Frequency 1000 -Duration 400; Start-Sleep -Seconds 1 }
+    }
+    Restart-Computer -Force
+}
+elseif ($NoRestart) {
+    Write-Log 'Restart suppressed (-NoRestart). Reboot manually to complete boot-time volume repair.' -Level Warning
 }
 
-# Create the system detection box
-Write-BoxedText -Title "SYSTEM DETECTION" -Messages @(
-    "Windows 11 detected with Build Number: $BuildNumber",
-    "Using ISO: $ISO",
-    "WIM Value: $WimValDisplay",
-    "Script is running elevated."
-) -ForegroundColor White
+exit $exitCode
 
-# Pause briefly to show the box
-Start-Sleep -Seconds 2
-
-# Continue with the rest of your script...
+#endregion

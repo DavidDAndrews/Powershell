@@ -4,98 +4,49 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository Overview
 
-This is a Windows maintenance and cleanup PowerShell script repository. The main file is `PS-FixW11.ps1`, which performs comprehensive system maintenance including:
+Windows maintenance and cleanup utility for Windows PowerShell 5.1 (the version that ships with Windows — no PowerShell 7 features are used). Files:
 
-- DISM (Deployment Image Servicing and Management) system file integrity checks
-- Windows Update installation
-- Disk cleanup and optimization
-- System log cleanup and archiving
-- User profile cleanup
-- System restart and repair
+- `FixWindows.ps1` — the main script. Self-elevates via UAC and runs maintenance in ordered, individually fault-tolerant phases.
+- `FixWindows.config.json` — optional runtime configuration (ISO share path, ISO filename map, retention periods, cleanup paths). Lets the script be updated per-environment without editing code.
+- `Enable-PowerShellExecution.bat` — helper to set the execution policy on new machines.
 
-## Key Script Architecture
+## Script Architecture (FixWindows.ps1)
 
-### Core Components
+The script is organized into `#region` blocks:
 
-1. **Configuration Section (Lines 49-138)**: 
-   - Configurable variables for ISO paths, WIM values, cleanup thresholds
-   - Network paths for Windows ISO files
-   - Maintenance configurations and retention periods
+1. **Self-elevation** — relaunches elevated via UAC, forwarding all bound parameters.
+2. **Default configuration** (`$Defaults`) — every tunable value, overridable by the JSON config, which is in turn overridable by explicit command-line parameters (`Merge-Configuration`).
+3. **Output helpers** — `Write-BoxedText` (centered console boxes), `Write-Log` (timestamped), `Write-Warning/Error/SuccessBox`, sound helpers (`Use-MissionImpossible`, `Use-Mario`, all silent in `-Unattended` mode).
+4. **Platform detection** — `Get-PlatformInfo` detects Windows 10/11 (x64/ARM64) and Server 2012 R2–2025 (Core vs Desktop Experience) and maps to a platform key used to pick the ISO. `Resolve-WimIndex` inspects the ISO's `install.wim`/`install.esd` with `Get-WindowsImage` and picks the image index matching the running edition (fallback: index 2 for server Desktop Experience, else 1).
+5. **Network share / ISO sync** — `Sync-LocalIso` pings the share host, authenticates (credentials cached DPAPI-encrypted at `%USERPROFILE%\FixWindows-Credentials.xml`), and copies the ISO to `C:\SVC` only when the source's size/timestamp differs from the local copy.
+6. **Maintenance phases** — `Invoke-HealthCheck` (DISM scan/check/restore from local ISO + SFC), `Invoke-VolumeRepair` (all fixed NTFS/ReFS volumes), `Backup-AndClearEventLogs`, `Invoke-FileCleanup` (table-driven from `CleanupPaths`), `Invoke-ProfileCleanup` (CIM-based), `Invoke-WindowsUpdatePhase` (PSWindowsUpdate with Windows Update COM fallback), `Invoke-CleanMgr` (enables all VolumeCaches handlers except `DownloadsFolder`).
+7. **Main** — `Invoke-Phase` wraps each phase in try/catch, records status/duration, prints a summary table; restart at the end unless `-NoRestart`.
 
-2. **OS Detection (Lines 217-305)**:
-   - Automatic detection of Windows versions (10, 11, Server 2016/2019/2022)
-   - Sets appropriate ISO file and WIM index based on detected OS
-   - Supports both desktop and server editions
+## Parameters
 
-3. **System Health Check (Lines 550-588)**:
-   - DISM health scan and repair operations
-   - Mounts Windows ISO for system file restoration
-   - System File Checker (SFC) execution
-   - Volume repair operations
+- `-DaysToDelete <int>` — age threshold for temp-file cleanup (default 1)
+- `-ProfileAge <int>` — age threshold for stale profile removal (default 30)
+- `-SkipHealthCheck` — skip DISM/SFC/volume repair (and ISO download)
+- `-SkipWindowsUpdate` — skip the update phase
+- `-NoRestart` — do not reboot at the end
+- `-Unattended` — no prompts, countdowns, or sounds (for scheduled tasks)
+- `-ISOSourcePath <path>` — override the ISO share path
+- `-ConfigPath <path>` — alternate JSON config location
+- `-WhatIf` — supported; destructive operations are skipped/logged
 
-4. **Cleanup Operations (Lines 600-896)**:
-   - Comprehensive file cleanup across multiple system locations
-   - Event log archiving and clearing
-   - Windows Update cache cleanup
-   - User profile cleanup based on age thresholds
+## Configuration precedence
 
-### Key Functions
+Command-line parameters > `FixWindows.config.json` > built-in `$Defaults`. The JSON `IsoFiles` map merges per key, so a partial map only overrides the entries it names. `DeleteShadowCopies` defaults to `false` because deleting shadow copies destroys System Restore points (including the one the script creates).
 
-- `Write-BoxedText`: Creates formatted console output boxes
-- `Write-WarningBox`, `Write-ErrorBox`, `Write-SuccessBox`: Status message helpers
-- `Use-MissionImpossible`, `Use-Mario`: Audio notification functions
-- `Start-CleanMGR`: Disk cleanup utility wrapper
+## Exit codes
 
-## Script Configuration
+- `0` — success
+- `1` — fatal error (unsupported OS, no ISO mapping, etc.)
+- `2` — completed, but one or more phases failed
 
-### Key Variables to Modify
+## Development notes
 
-- `$ISO_SOURCE_PATH`: Network path to Windows ISO files
-- `$ISO_FILES`: Hash table mapping Windows versions to ISO filenames
-- `$WIM_VALUES`: WIM index values for different installation types
-- `$CLEANUP_PATHS`: Directory paths for cleanup operations
-- `$DEFAULT_DAYS_TO_DELETE`: File retention period
-- `$PROFILE_AGE_LIMIT`: User profile cleanup threshold
-
-### Parameters
-
-- `-DaysToDelete`: Days before temp files are deleted (default: 1)
-- `-ProfileAge`: Days before unused profiles are deleted (default: 30)
-- `-SkipWindowsUpdate`: Skip Windows Update installation
-- `-NoRestart`: Skip system restart
-- `-ISOSourcePath`: Custom ISO source path
-
-## Execution Requirements
-
-- **Administrator privileges required**: Script self-elevates if not running as admin
-- **Windows ISO access**: Requires access to Windows ISO files (network or local)
-- **PowerShell execution policy**: Must allow script execution
-- **Network connectivity**: For Windows Updates and ISO downloads
-
-## Common Operations
-
-### Running the Script
-```powershell
-# Basic execution
-.\PS-FixW11.ps1
-
-# With custom parameters
-.\PS-FixW11.ps1 -DaysToDelete 7 -ProfileAge 60 -SkipWindowsUpdate
-
-# Test run without restart
-.\PS-FixW11.ps1 -NoRestart -WhatIf
-```
-
-### Customization
-- Modify ISO_FILES hash table for different Windows versions
-- Update CLEANUP_PATHS for additional cleanup locations
-- Adjust retention periods in configuration section
-
-## Important Notes
-
-- Script creates logs in `C:\SVC\Clean-[date].log`
-- Backs up event logs before clearing them
-- Creates system restore point before major changes
-- Requires reboot after completion for optimal results
-- Handles both desktop and server Windows editions
-- Supports Windows 10, 11, Server 2016, 2019, and 2022
+- Target Windows PowerShell 5.1: no ternary, `??`, `&&`/`||` chains, or `ForEach-Object -Parallel`.
+- Prefer `Get-CimInstance` over the removed-in-PS7 `Get-WmiObject`.
+- Lint with `Invoke-ScriptAnalyzer -Path .\FixWindows.ps1`; parse-check with `[System.Management.Automation.Language.Parser]::ParseFile`. Remaining accepted warnings: `Write-Host` (intentional console UX) and empty catch blocks used as reachability probes.
+- Logs: transcript at `C:\SVC\Clean-<date>.log`; event log archives under `C:\Logs\<Month-day>\`.

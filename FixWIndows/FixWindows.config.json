@@ -1,0 +1,20 @@
+{
+  "IsoSourcePath": "\\\\192.168.111.10\\nas-data\\ISO\\WINDOWS",
+  "WorkFolder": "C:\\SVC",
+  "EventLogBackupRoot": "C:\\Logs",
+  "DaysToDelete": 1,
+  "ProfileAge": 30,
+  "IisLogAgeDays": 60,
+  "DeleteShadowCopies": false,
+  "CreateRestorePoint": true,
+  "IsoFiles": {
+    "WIN11": "W11PRO-24H2.ISO",
+    "WIN11_ARM64": "W11Pro-ARM64.iso",
+    "WIN10": "W10PRO-1809.ISO",
+    "SVR2025": "W2025.ISO",
+    "SVR2022": "W2022.ISO",
+    "SVR2019": "W2019-1809.ISO",
+    "SVR2016": "W2016-1607.ISO",
+    "SVR2012R2": "W2012R2-1207.ISO"
+  }
+}
