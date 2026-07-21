@@ -237,8 +237,10 @@ function ConvertTo-HtmlEncoded {
 
 function New-HtmlTable {
     param([object[]]$Data, [string[]]$Properties)
-    if (-not $Data -or $Data.Count -eq 0) { return '<p class="no-data">No data available.</p>' }
-    if (-not $Properties -or $Properties.Count -eq 0) { $Properties = $Data[0].PSObject.Properties.Name }
+    if ((Get-SafeCount $Data) -eq 0) { return '<p class="no-data">No data available.</p>' }
+    if (-not $Properties -or $Properties.Count -eq 0) {
+        $Properties = @($Data[0].PSObject.Properties | ForEach-Object { $_.Name })
+    }
     $sb = [System.Text.StringBuilder]::new()
     [void]$sb.Append('<table><thead><tr>')
     foreach ($p in $Properties) { [void]$sb.Append("<th>$(ConvertTo-HtmlEncoded $p)</th>") }
@@ -246,7 +248,8 @@ function New-HtmlTable {
     foreach ($row in $Data) {
         [void]$sb.Append('<tr>')
         foreach ($p in $Properties) {
-            $val = $row.$p; if ($null -eq $val) { $val = '' }
+            $val = Get-ObjectProperty -InputObject $row -Name $p -Default ''
+            if ($null -eq $val) { $val = '' }
             [void]$sb.Append("<td>$(ConvertTo-HtmlEncoded ($val.ToString()))</td>")
         }
         [void]$sb.Append('</tr>')
@@ -296,6 +299,112 @@ function Test-IsAdmin {
     $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
     $p  = New-Object System.Security.Principal.WindowsPrincipal($id)
     return $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-ObjectProperty {
+    <#
+    .SYNOPSIS
+        StrictMode-safe property read. Returns $Default when missing or input is null.
+    #>
+    param(
+        [AllowNull()]$InputObject,
+        [Parameter(Mandatory)][string]$Name,
+        $Default = $null
+    )
+    if ($null -eq $InputObject) { return $Default }
+    $prop = $InputObject.PSObject.Properties[$Name]
+    if ($null -eq $prop) { return $Default }
+    return $prop.Value
+}
+
+function Get-SafeCount {
+    param([AllowNull()]$InputObject)
+    return @($InputObject).Count
+}
+
+function Test-IsDeserializedTypeName {
+    # WinPS compatibility shim often replaces complex objects with their type name string.
+    param([AllowNull()]$Value, [string]$TypeName)
+    return ($Value -is [string] -and $Value -eq $TypeName)
+}
+
+function Get-GpoAdVersions {
+    <#
+    .SYNOPSIS
+        User/Computer GPO versions from the GPO object, or GPT.INI when the PS7 shim omits them.
+    #>
+    param(
+        [Parameter(Mandatory)]$Gpo,
+        [string]$DomainName
+    )
+    $userVer = Get-ObjectProperty -InputObject $Gpo -Name 'UserVersion'
+    $compVer = Get-ObjectProperty -InputObject $Gpo -Name 'ComputerVersion'
+    if ($null -ne $userVer -and $null -ne $compVer) {
+        return @{ User = ([int]$userVer -band 0xFFFF); Computer = ([int]$compVer -band 0xFFFF) }
+    }
+
+    try {
+        $id = [string](Get-ObjectProperty -InputObject $Gpo -Name 'Id' -Default '')
+        $id = $id.Trim('{}')
+        if (-not $id -or -not $DomainName) { return @{ User = 0; Computer = 0 } }
+        $gptPath = "\\$DomainName\SYSVOL\$DomainName\Policies\{$id}\GPT.INI"
+        if (-not (Test-Path -LiteralPath $gptPath)) { return @{ User = 0; Computer = 0 } }
+        $vLine = Get-Content -LiteralPath $gptPath -ErrorAction Stop |
+            Where-Object { $_ -match '^\s*Version\s*=' } |
+            Select-Object -First 1
+        if (-not $vLine) { return @{ User = 0; Computer = 0 } }
+        $sysVer = [int](($vLine -replace '.*=\s*', '').Trim())
+        return @{ User = ($sysVer -shr 16); Computer = ($sysVer -band 0xFFFF) }
+    }
+    catch {
+        return @{ User = 0; Computer = 0 }
+    }
+}
+
+function Invoke-WindowsPowerShellJson {
+    <#
+    .SYNOPSIS
+        Runs a script in Windows PowerShell 5.1 and returns objects from JSON.
+        Used when the PS7 WinPS compatibility shim drops complex GroupPolicy types.
+    #>
+    param(
+        [Parameter(Mandatory)][string]$Script,
+        [int]$Depth = 6
+    )
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $exe)) {
+        throw 'Windows PowerShell 5.1 not found (powershell.exe).'
+    }
+
+    $wrapped = @"
+`$ErrorActionPreference = 'Stop'
+Import-Module GroupPolicy -ErrorAction Stop
+try { Import-Module ActiveDirectory -ErrorAction SilentlyContinue } catch {}
+`$__result = . { $Script }
+if (`$null -eq `$__result) { return }
+`$__result | ConvertTo-Json -Depth $Depth -Compress
+"@
+    $tmpIn  = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.ps1')
+    $tmpOut = [System.IO.Path]::GetTempFileName()
+    $tmpErr = "$tmpOut.err"
+    try {
+        Set-Content -LiteralPath $tmpIn -Value $wrapped -Encoding UTF8
+        $p = Start-Process -FilePath $exe `
+            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmpIn) `
+            -Wait -PassThru -WindowStyle Hidden `
+            -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
+        $json = Get-Content -LiteralPath $tmpOut -Raw -ErrorAction SilentlyContinue
+        if ($p.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($json)) {
+            $errText = Get-Content -LiteralPath $tmpErr -Raw -ErrorAction SilentlyContinue
+            throw "Windows PowerShell call failed (exit $($p.ExitCode)): $errText"
+        }
+        if ([string]::IsNullOrWhiteSpace($json)) { return @() }
+        $parsed = $json | ConvertFrom-Json
+        return @($parsed)
+    }
+    finally {
+        Remove-Item -LiteralPath $tmpIn, $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Request-AdministratorElevation {
@@ -854,80 +963,113 @@ function Get-DomainGPOInventory {
 
     if (-not $script:GPModuleLoaded) { Write-Log '  GP module unavailable. Skipped.' -Level WARN; return @() }
 
-    $allGPOs = try { Get-GPO -All -Domain $DomainName -EA Stop } catch { Write-Log "  Get-GPO -All failed: $_" -Level ERROR; return @() }
-    Write-Log "  Found $($allGPOs.Count) GPO(s)." -Level INFO
+    $allGPOs = try { @(Get-GPO -All -Domain $DomainName -EA Stop) } catch { Write-Log "  Get-GPO -All failed: $_" -Level ERROR; return @() }
+    Write-Log "  Found $(Get-SafeCount $allGPOs) GPO(s)." -Level INFO
 
     $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
-    $total = $allGPOs.Count; $idx = 0
+    $total = Get-SafeCount $allGPOs; $idx = 0
 
     foreach ($gpo in $allGPOs) {
         $idx++
-        Write-Progress -Activity 'GPO Inventory' -Status "$($gpo.DisplayName) ($idx/$total)" `
-            -PercentComplete ([int](($idx / $total) * 100))
-
-        $userEnabled     = $gpo.GpoStatus -notin @('UserSettingsDisabled','AllSettingsDisabled')
-        $computerEnabled = $gpo.GpoStatus -notin @('ComputerSettingsDisabled','AllSettingsDisabled')
-        $wmiFilter       = if ($gpo.WmiFilter) { $gpo.WmiFilter.Name } else { '' }
-        $safeName        = Get-SafeFileName $gpo.DisplayName
-        $xmlFile         = Join-Path $DomainGPODir "XML\$safeName.xml"
-        $htmlFile        = Join-Path $DomainGPODir "HTML\$safeName.html"
-
-        $flags   = @{ Scripts=$false; Prefs=$false; SchTasks=$false; DriveMaps=$false
-                      RegPrefs=$false; Printers=$false; SoftInst=$false; CPassword=$false; Empty=$false }
-        $linkCount = 0; $links = @()
+        $displayName = [string](Get-ObjectProperty -InputObject $gpo -Name 'DisplayName' -Default 'Unknown')
+        $gpoId       = [string](Get-ObjectProperty -InputObject $gpo -Name 'Id' -Default '')
+        Write-Progress -Activity 'GPO Inventory' -Status "$displayName ($idx/$total)" `
+            -PercentComplete $(if ($total -gt 0) { [int](($idx / $total) * 100) } else { 0 })
 
         try {
-            Get-GPOReport -Guid $gpo.Id -ReportType Xml  -Domain $DomainName -Path $xmlFile  -EA Stop
-            Get-GPOReport -Guid $gpo.Id -ReportType Html -Domain $DomainName -Path $htmlFile -EA Stop
-            [xml]$rXml = Get-Content $xmlFile -Raw -EA SilentlyContinue
-            if ($rXml) {
-                $x = $rXml.OuterXml
-                $flags.Scripts    = $x -match '<Script\b|<Scripts\b'
-                $flags.Prefs      = $x -match '<Preferences\b|Preferences xmlns'
-                $flags.SchTasks   = $x -match 'ScheduledTasks'
-                $flags.DriveMaps  = $x -match 'DriveMapSettings|DriveMap'
-                $flags.RegPrefs   = $x -match 'RegistrySettings|:Registry'
-                $flags.Printers   = $x -match 'PrinterSettings|Printers'
-                $flags.SoftInst   = $x -match 'SoftwareInstallation|ClassStore'
-                $flags.CPassword  = $x -match 'cpassword'
-                $flags.Empty      = (-not $rXml.GPO.Computer.ExtensionData -and -not $rXml.GPO.User.ExtensionData)
-                $lNodes = $rXml.GPO.LinksTo
-                if ($lNodes) {
-                    $links = @($lNodes) | ForEach-Object {
-                        [pscustomobject]@{
-                            SOMPath     = $_.SOMPath
-                            SOMType     = $_.SOMType
-                            LinkEnabled = ($_.Enabled   -ne 'false')
-                            Enforced    = ($_.NoOverride -eq 'true')
-                        }
-                    }
-                    $linkCount = $links.Count
-                }
+            $gpoStatusRaw    = Get-ObjectProperty -InputObject $gpo -Name 'GpoStatus' -Default 'AllSettingsEnabled'
+            $gpoStatus       = $gpoStatusRaw.ToString()
+            $userEnabled     = $gpoStatus -notin @('UserSettingsDisabled','AllSettingsDisabled')
+            $computerEnabled = $gpoStatus -notin @('ComputerSettingsDisabled','AllSettingsDisabled')
+
+            $wmiObj    = Get-ObjectProperty -InputObject $gpo -Name 'WmiFilter'
+            $wmiFilter = ''
+            if ($null -ne $wmiObj -and -not [string]::IsNullOrWhiteSpace([string]$wmiObj) -and
+                -not (Test-IsDeserializedTypeName -Value $wmiObj -TypeName 'Microsoft.GroupPolicy.WmiFilter')) {
+                $wmiName = Get-ObjectProperty -InputObject $wmiObj -Name 'Name'
+                $wmiFilter = if ($null -ne $wmiName) { [string]$wmiName } else { [string]$wmiObj }
             }
-        } catch { Write-Log "  Report failed for '$($gpo.DisplayName)': $_" -Level WARN }
 
-        $entry = [pscustomobject]@{
-            Name = $gpo.DisplayName; Id = $gpo.Id.ToString(); Domain = $gpo.DomainName
-            Owner = $gpo.Owner; Description = $gpo.Description
-            Created = $gpo.CreationTime; Modified = $gpo.ModificationTime
-            GpoStatus = $gpo.GpoStatus.ToString()
-            UserSettingsEnabled = $userEnabled; ComputerSettingsEnabled = $computerEnabled
-            UserVersion = ($gpo.UserVersion -band 0xFFFF); ComputerVersion = ($gpo.ComputerVersion -band 0xFFFF)
-            WmiFilter = $wmiFilter; LinkCount = $linkCount; Links = $links
-            HasScripts = $flags.Scripts; HasPreferences = $flags.Prefs; HasScheduledTasks = $flags.SchTasks
-            HasDriveMaps = $flags.DriveMaps; HasRegistryPrefs = $flags.RegPrefs
-            HasPrinters = $flags.Printers; HasSoftwareInstall = $flags.SoftInst
-            HasCPassword = $flags.CPassword; IsEmpty = $flags.Empty
-            XmlReportPath = $xmlFile; HtmlReportPath = $htmlFile
+            $versions = Get-GpoAdVersions -Gpo $gpo -DomainName $DomainName
+            $safeName = Get-SafeFileName $displayName
+            $xmlFile  = Join-Path $DomainGPODir "XML\$safeName.xml"
+            $htmlFile = Join-Path $DomainGPODir "HTML\$safeName.html"
+
+            $flags = @{ Scripts=$false; Prefs=$false; SchTasks=$false; DriveMaps=$false
+                        RegPrefs=$false; Printers=$false; SoftInst=$false; CPassword=$false; Empty=$false }
+            $linkCount = 0; $links = @()
+
+            try {
+                if ($gpoId) {
+                    Get-GPOReport -Guid $gpoId -ReportType Xml  -Domain $DomainName -Path $xmlFile  -EA Stop
+                    Get-GPOReport -Guid $gpoId -ReportType Html -Domain $DomainName -Path $htmlFile -EA Stop
+                }
+                [xml]$rXml = Get-Content $xmlFile -Raw -EA SilentlyContinue
+                if ($rXml) {
+                    $x = $rXml.OuterXml
+                    $flags.Scripts    = $x -match '<Script\b|<Scripts\b'
+                    $flags.Prefs      = $x -match '<Preferences\b|Preferences xmlns'
+                    $flags.SchTasks   = $x -match 'ScheduledTasks'
+                    $flags.DriveMaps  = $x -match 'DriveMapSettings|DriveMap'
+                    $flags.RegPrefs   = $x -match 'RegistrySettings|:Registry'
+                    $flags.Printers   = $x -match 'PrinterSettings|Printers'
+                    $flags.SoftInst   = $x -match 'SoftwareInstallation|ClassStore'
+                    $flags.CPassword  = $x -match 'cpassword'
+                    $compExt = Get-ObjectProperty -InputObject $rXml.GPO.Computer -Name 'ExtensionData'
+                    $userExt = Get-ObjectProperty -InputObject $rXml.GPO.User -Name 'ExtensionData'
+                    $flags.Empty = ($null -eq $compExt -and $null -eq $userExt)
+                    $lNodes = Get-ObjectProperty -InputObject $rXml.GPO -Name 'LinksTo'
+                    if ($lNodes) {
+                        $links = @($lNodes) | ForEach-Object {
+                            $somPath = [string](Get-ObjectProperty -InputObject $_ -Name 'SOMPath' -Default '')
+                            $somType = if ($somPath -eq $DomainName) { 'Domain' }
+                                       elseif ($somPath -match '[\\/]') { 'OU' }
+                                       else { 'Site' }
+                            [pscustomobject]@{
+                                SOMPath     = $somPath
+                                SOMName     = [string](Get-ObjectProperty -InputObject $_ -Name 'SOMName' -Default '')
+                                SOMType     = $somType
+                                LinkEnabled = ([string](Get-ObjectProperty -InputObject $_ -Name 'Enabled' -Default 'true') -ne 'false')
+                                Enforced    = ([string](Get-ObjectProperty -InputObject $_ -Name 'NoOverride' -Default 'false') -eq 'true')
+                            }
+                        }
+                        $linkCount = Get-SafeCount $links
+                    }
+                }
+            } catch { Write-Log "  Report failed for '$displayName': $_" -Level WARN }
+
+            $owner = Get-ObjectProperty -InputObject $gpo -Name 'Owner' -Default ''
+            $desc  = Get-ObjectProperty -InputObject $gpo -Name 'Description' -Default ''
+            $created  = Get-ObjectProperty -InputObject $gpo -Name 'CreationTime'
+            $modified = Get-ObjectProperty -InputObject $gpo -Name 'ModificationTime'
+            $domainNm = Get-ObjectProperty -InputObject $gpo -Name 'DomainName' -Default $DomainName
+
+            $entry = [pscustomobject]@{
+                Name = $displayName; Id = $gpoId.Trim('{}'); Domain = [string]$domainNm
+                Owner = [string]$owner; Description = [string]$desc
+                Created = $created; Modified = $modified
+                GpoStatus = $gpoStatus
+                UserSettingsEnabled = $userEnabled; ComputerSettingsEnabled = $computerEnabled
+                UserVersion = $versions.User; ComputerVersion = $versions.Computer
+                WmiFilter = $wmiFilter; LinkCount = $linkCount; Links = $links
+                HasScripts = $flags.Scripts; HasPreferences = $flags.Prefs; HasScheduledTasks = $flags.SchTasks
+                HasDriveMaps = $flags.DriveMaps; HasRegistryPrefs = $flags.RegPrefs
+                HasPrinters = $flags.Printers; HasSoftwareInstall = $flags.SoftInst
+                HasCPassword = $flags.CPassword; IsEmpty = $flags.Empty
+                XmlReportPath = $xmlFile; HtmlReportPath = $htmlFile
+            }
+            $inventory.Add($entry)
+
+            if ($flags.CPassword) {
+                Add-Finding -Severity Critical -Category Security `
+                    -Title  "cpassword in GPO: '$displayName'" `
+                    -Detail "GPO contains a Group Policy Preferences cpassword entry (MS14-025)." `
+                    -Recommendation 'Remove cpassword immediately. Deploy LAPS. Apply MS14-025 patch.' `
+                    -AffectedObject $displayName
+            }
         }
-        $inventory.Add($entry)
-
-        if ($flags.CPassword) {
-            Add-Finding -Severity Critical -Category Security `
-                -Title  "cpassword in GPO: '$($gpo.DisplayName)'" `
-                -Detail "GPO contains a Group Policy Preferences cpassword entry (MS14-025)." `
-                -Recommendation 'Remove cpassword immediately. Deploy LAPS. Apply MS14-025 patch.' `
-                -AffectedObject $gpo.DisplayName
+        catch {
+            Write-Log "  Failed to inventory GPO '$displayName': $_" -Level WARN
         }
     }
     Write-Progress -Activity 'GPO Inventory' -Completed
@@ -941,78 +1083,173 @@ function Get-DomainGPOInventory {
         ConvertTo-Json -Depth 3 | Out-File (Join-Path $RawDataDir 'GPO_Inventory.json') -Encoding UTF8 -Force
 
     Write-Log "  Inventory complete: $($inventory.Count) GPOs." -Level SUCCESS
-    return $inventory
+    return , @($inventory.ToArray())
 }
 
 #endregion
 
 #region ── GPO LINK INVENTORY ─────────────────────────────────────────────────
 
+function ConvertFrom-GPLinkAttribute {
+    param(
+        [string]$GPLink,
+        [string]$TargetDN,
+        [string]$TargetType,
+        [bool]$BlockInheritance = $false
+    )
+    if ([string]::IsNullOrWhiteSpace($GPLink)) { return @() }
+
+    $results = [System.Collections.Generic.List[pscustomobject]]::new()
+    $rx = [regex]'\[LDAP://(?<path>[^\]]+);(?<opt>\d+)\]'
+    $order = 0
+    foreach ($m in $rx.Matches($GPLink)) {
+        $order++
+        $path = $m.Groups['path'].Value
+        $opt  = [int]$m.Groups['opt'].Value
+        $guid = if ($path -match '\{([0-9A-Fa-f-]{36})\}') { $Matches[1] } else { '' }
+        # Bit0 = link disabled, Bit1 = enforced (No Override)
+        $results.Add([pscustomobject]@{
+            GPOName           = ''
+            GPOId             = $guid
+            Target            = $TargetDN
+            TargetType        = $TargetType
+            LinkOrder         = $order
+            LinkEnabled       = (($opt -band 1) -eq 0)
+            Enforced          = (($opt -band 2) -ne 0)
+            BlockInheritance  = $BlockInheritance
+        })
+    }
+    return , @($results.ToArray())
+}
+
 function Get-GPOLinkInventory {
     param([string]$DomainName, [string]$RawDataDir)
     Write-Log 'Enumerating GPO links' -Level SECTION
-    if (-not $script:GPModuleLoaded) { Write-Log '  GP module unavailable. Skipped.' -Level WARN; return @() }
 
     $allLinks = [System.Collections.Generic.List[pscustomobject]]::new()
+    $gpoNameById = @{}
 
-    function Add-LinkSet { param($Inherit, [string]$CType)
-        if (-not $Inherit) { return }
-        $blocked = [bool]$Inherit.GpoInheritanceBlocked
-        foreach ($lk in $Inherit.GpoLinks) {
-            $allLinks.Add([pscustomobject]@{
-                GPOName=''; GPOId=$lk.GpoId.ToString()
-                GPOName_=$lk.DisplayName
-                Target=$Inherit.Path; TargetType=$CType
-                LinkOrder=$lk.Order; LinkEnabled=$lk.Enabled
-                Enforced=$lk.Enforced; BlockInheritance=$blocked
-            })
-        }
-    }
-
-    # Domain
+    # Prefer LDAP gpLink — Get-GPInheritance GpoLink objects break under the PS7 WinPS shim.
     try {
-        $domDN = if ($script:ADModuleLoaded) { (Get-ADDomain -Identity $DomainName -EA Stop).DistinguishedName }
-                 else { "DC=$($DomainName.Replace('.', ',DC='))" }
-        Add-LinkSet (Get-GPInheritance -Target $domDN -Domain $DomainName -EA Stop) 'Domain'
-        Write-Log '  Domain-level links collected.' -Level SUCCESS
-    } catch { Write-Log "  Domain links failed: $_" -Level WARN }
-
-    # Sites
-    try {
-        $cfgNC  = ([adsi]'LDAP://RootDSE').configurationNamingContext
-        $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
-        foreach ($site in $forest.Sites) {
-            try { Add-LinkSet (Get-GPInheritance -Target "CN=$($site.Name),CN=Sites,$cfgNC" -Domain $DomainName -EA Stop) 'Site' } catch {}
+        $domDN = if ($script:ADModuleLoaded) {
+            (Get-ADDomain -Identity $DomainName -EA Stop).DistinguishedName
+        } else {
+            "DC=$($DomainName.Replace('.', ',DC='))"
         }
-        Write-Log '  Site-level links collected.' -Level SUCCESS
-    } catch { Write-Log "  Site links failed: $_" -Level WARN }
 
-    # OUs
-    if ($script:ADModuleLoaded) {
-        try {
-            $ous = Get-ADOrganizationalUnit -Filter * -Properties DistinguishedName -EA Stop
-            $ouT = @($ous).Count; $ouI = 0
-            foreach ($ou in $ous) {
-                $ouI++
-                Write-Progress -Activity 'OU Link Inventory' -Status "$($ou.Name) ($ouI/$ouT)" `
-                    -PercentComplete ([int](($ouI / $ouT) * 100))
-                try { Add-LinkSet (Get-GPInheritance -Target $ou.DistinguishedName -Domain $DomainName -EA Stop) 'OU' } catch {}
+        # Cache GPO display names
+        if ($script:GPModuleLoaded) {
+            try {
+                foreach ($g in @(Get-GPO -All -Domain $DomainName -EA Stop)) {
+                    $id = [string](Get-ObjectProperty -InputObject $g -Name 'Id' -Default '')
+                    $nm = [string](Get-ObjectProperty -InputObject $g -Name 'DisplayName' -Default '')
+                    if ($id) { $gpoNameById[$id.Trim('{}').ToLower()] = $nm }
+                }
+            } catch {}
+        }
+
+        function Add-LinksFromDirectoryEntry {
+            param([string]$Dn, [string]$CType)
+            try {
+                $entry = [adsi]"LDAP://$Dn"
+                $gpLink = ''
+                if ($entry.Properties.Contains('gplink')) {
+                    $gpLink = [string]$entry.Properties['gplink'][0]
+                }
+                $blocked = $false
+                if ($entry.Properties.Contains('gpoptions')) {
+                    $blocked = (([int]$entry.Properties['gpoptions'][0]) -band 1) -ne 0
+                }
+                foreach ($lk in @(ConvertFrom-GPLinkAttribute -GPLink $gpLink -TargetDN $Dn -TargetType $CType -BlockInheritance $blocked)) {
+                    $key = $lk.GPOId.ToLower()
+                    if ($gpoNameById.ContainsKey($key)) { $lk.GPOName = $gpoNameById[$key] }
+                    $allLinks.Add($lk)
+                }
+            } catch {
+                Write-Log "  Link read failed for '$Dn': $_" -Level WARN
             }
-            Write-Progress -Activity 'OU Link Inventory' -Completed
-            Write-Log "  OU-level links collected ($ouT OUs)." -Level SUCCESS
-        } catch { Write-Log "  OU links failed: $_" -Level WARN }
-    }
+        }
 
-    # Fix up GPOName from GPOName_ (rename for clean export)
-    foreach ($lk in $allLinks) { $lk.GPOName = $lk.GPOName_ }
+        Add-LinksFromDirectoryEntry -Dn $domDN -CType 'Domain'
+        Write-Log '  Domain-level links collected.' -Level SUCCESS
+
+        try {
+            $cfgNC  = ([adsi]'LDAP://RootDSE').configurationNamingContext
+            $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
+            foreach ($site in $forest.Sites) {
+                Add-LinksFromDirectoryEntry -Dn "CN=$($site.Name),CN=Sites,$cfgNC" -CType 'Site'
+            }
+            Write-Log '  Site-level links collected.' -Level SUCCESS
+        } catch { Write-Log "  Site links failed: $_" -Level WARN }
+
+        if ($script:ADModuleLoaded) {
+            try {
+                $ous = @(Get-ADOrganizationalUnit -Filter * -Properties DistinguishedName -EA Stop)
+                $ouT = $ous.Count; $ouI = 0
+                foreach ($ou in $ous) {
+                    $ouI++
+                    Write-Progress -Activity 'OU Link Inventory' -Status "$($ou.Name) ($ouI/$ouT)" `
+                        -PercentComplete $(if ($ouT -gt 0) { [int](($ouI / $ouT) * 100) } else { 0 })
+                    Add-LinksFromDirectoryEntry -Dn $ou.DistinguishedName -CType 'OU'
+                }
+                Write-Progress -Activity 'OU Link Inventory' -Completed
+                Write-Log "  OU-level links collected ($ouT OUs)." -Level SUCCESS
+            } catch { Write-Log "  OU links failed: $_" -Level WARN }
+        }
+    }
+    catch {
+        Write-Log "  LDAP link enumeration failed: $_. Falling back to Get-GPInheritance via Windows PowerShell." -Level WARN
+        try {
+            $native = Invoke-WindowsPowerShellJson -Script @"
+`$links = [System.Collections.Generic.List[object]]::new()
+function Add-NativeLinks(`$inherit, `$ctype) {
+    if (-not `$inherit) { return }
+    `$blocked = [bool]`$inherit.GpoInheritanceBlocked
+    foreach (`$lk in @(`$inherit.GpoLinks)) {
+        `$links.Add([pscustomobject]@{
+            GPOName = `$lk.DisplayName
+            GPOId = `$lk.GpoId.ToString().Trim('{}')
+            Target = `$inherit.Path
+            TargetType = `$ctype
+            LinkOrder = `$lk.Order
+            LinkEnabled = [bool]`$lk.Enabled
+            Enforced = [bool]`$lk.Enforced
+            BlockInheritance = `$blocked
+        })
+    }
+}
+`$dom = Get-ADDomain -Identity '$DomainName'
+Add-NativeLinks (Get-GPInheritance -Target `$dom.DistinguishedName -Domain '$DomainName') 'Domain'
+Get-ADOrganizationalUnit -Filter * | ForEach-Object {
+    try { Add-NativeLinks (Get-GPInheritance -Target `$_.DistinguishedName -Domain '$DomainName') 'OU' } catch {}
+}
+`$links
+"@
+            foreach ($lk in @($native)) { $allLinks.Add([pscustomobject]$lk) }
+        } catch {
+            Write-Log "  Native link fallback also failed: $_" -Level WARN
+        }
+    }
 
     $disabled = @($allLinks | Where-Object { -not $_.LinkEnabled })
     $enforced = @($allLinks | Where-Object { $_.Enforced })
     $blocked  = @($allLinks | Where-Object { $_.BlockInheritance } | Select-Object -ExpandProperty Target -Unique)
 
-    if ($disabled.Count -gt 0) { Add-Finding -Severity Low    -Category Links -Title "$($disabled.Count) disabled GPO link(s)"          -Detail "Disabled: $(($disabled.GPOName -join '; '))" -Recommendation 'Remove disabled links no longer needed.' }
-    if ($enforced.Count -gt 0) { Add-Finding -Severity Medium -Category Links -Title "$($enforced.Count) enforced (No Override) link(s)" -Detail 'Enforced links override Block Inheritance.' -Recommendation 'Confirm each enforced link is intentional.' }
-    if ($blocked.Count  -gt 0) { Add-Finding -Severity Medium -Category Links -Title "$($blocked.Count) OU(s) with Block Inheritance"   -Detail ($blocked -join '; ') -Recommendation 'Use Block Inheritance sparingly; document business justification.' }
+    if ((Get-SafeCount $disabled) -gt 0) {
+        Add-Finding -Severity Low -Category Links -Title "$(Get-SafeCount $disabled) disabled GPO link(s)" `
+            -Detail "Disabled: $(($disabled.GPOName | Where-Object { $_ } | Select-Object -Unique) -join '; ')" `
+            -Recommendation 'Remove disabled links no longer needed.'
+    }
+    if ((Get-SafeCount $enforced) -gt 0) {
+        Add-Finding -Severity Medium -Category Links -Title "$(Get-SafeCount $enforced) enforced (No Override) link(s)" `
+            -Detail 'Enforced links override Block Inheritance.' `
+            -Recommendation 'Confirm each enforced link is intentional.'
+    }
+    if ((Get-SafeCount $blocked) -gt 0) {
+        Add-Finding -Severity Medium -Category Links -Title "$(Get-SafeCount $blocked) OU(s) with Block Inheritance" `
+            -Detail ($blocked -join '; ') `
+            -Recommendation 'Use Block Inheritance sparingly; document business justification.'
+    }
 
     $allLinks | Select-Object GPOName,GPOId,Target,TargetType,LinkOrder,LinkEnabled,Enforced,BlockInheritance |
         Export-Csv (Join-Path $RawDataDir 'GPO_Links.csv') -NoTypeInformation -Force
@@ -1020,7 +1257,7 @@ function Get-GPOLinkInventory {
         ConvertTo-Json -Depth 3 | Out-File (Join-Path $RawDataDir 'GPO_Links.json') -Encoding UTF8 -Force
 
     Write-Log "  Total link records: $($allLinks.Count)." -Level INFO
-    return $allLinks
+    return , @($allLinks.ToArray())
 }
 
 #endregion
@@ -1033,62 +1270,127 @@ function Get-GPOPermissionsAudit {
     if (-not $script:GPModuleLoaded) { Write-Log '  GP module unavailable. Skipped.' -Level WARN; return @() }
 
     $allPerms = [System.Collections.Generic.List[pscustomobject]]::new()
-    $total = $GPOInventory.Count; $idx = 0
+    $useNative = $PSVersionTable.PSEdition -eq 'Core'
 
-    foreach ($gpo in $GPOInventory) {
-        $idx++
-        Write-Progress -Activity 'GPO Permissions' -Status "$($gpo.Name) ($idx/$total)" `
-            -PercentComplete ([int](($idx / $total) * 100))
+    if ($useNative) {
+        Write-Log '  PS 7 detected — collecting permissions via Windows PowerShell (Trustee objects break under the compatibility shim).'
         try {
-            $perms      = Get-GPPermission -Guid $gpo.Id -All -EA Stop
-            $applyPerms = @($perms | Where-Object { $_.Permission.ToString() -eq 'GpoApply' })
-            if ($applyPerms.Count -eq 0 -and $gpo.GpoStatus -ne 'AllSettingsDisabled') {
-                Add-Finding -Severity High -Category Security `
-                    -Title  "No 'Apply Group Policy' permission on '$($gpo.Name)'" `
-                    -Detail 'No principal has Apply Group Policy. This GPO will never apply to any object.' `
-                    -Recommendation 'Add Apply Group Policy to Authenticated Users or a targeted security group.' `
-                    -AffectedObject $gpo.Name
-            }
-            foreach ($p in $perms) {
-                $trustee = $p.Trustee.Name; $permStr = $p.Permission.ToString(); $sidType = $p.Trustee.SidType.ToString()
-                $allPerms.Add([pscustomobject]@{
-                    GPOName    = $gpo.Name; GPOId = $gpo.Id
-                    Trustee    = $trustee; TrusteeSid = $p.Trustee.Sid.ToString()
-                    TrusteeType= $sidType; Permission = $permStr; Denied = $p.Denied
-                })
-                if ($sidType -eq 'Unknown' -or $trustee -match '^S-1-') {
-                    Add-Finding -Severity Medium -Category Security -Title "Unresolved SID on '$($gpo.Name)'" `
-                        -Detail "SID: $($p.Trustee.Sid) | Permission: $permStr" `
-                        -Recommendation 'Remove the orphaned SID from the GPO ACL.' -AffectedObject $gpo.Name
-                }
-                if ($trustee -match '^Everyone$|^Anonymous') {
-                    Add-Finding -Severity High -Category Security -Title "Overly broad permission on '$($gpo.Name)'" `
-                        -Detail "'$trustee' has '$permStr'." `
-                        -Recommendation "Remove 'Everyone' or 'Anonymous' from this GPO's ACL." -AffectedObject $gpo.Name
-                }
-                if ($permStr -in 'GpoEdit','GpoEditDeleteModifySecurity') {
-                    if ($trustee -notmatch 'Domain Admins|Enterprise Admins|Group Policy Creator Owners|SYSTEM|Administrators') {
-                        Add-Finding -Severity High -Category Security -Title "Non-standard editor on '$($gpo.Name)'" `
-                            -Detail "'$trustee' has '$permStr'." `
-                            -Recommendation "Confirm '$trustee' requires edit rights." -AffectedObject $gpo.Name
-                    }
-                }
-                if ($permStr -eq 'GpoApply') {
-                    $hasRead = $perms | Where-Object { $_.Trustee.Name -eq $trustee -and $_.Permission.ToString() -eq 'GpoRead' }
-                    if (-not $hasRead) {
-                        Add-Finding -Severity Medium -Category Security -Title "Apply without Read on '$($gpo.Name)'" `
-                            -Detail "'$trustee' has Apply but not Read." `
-                            -Recommendation "Add Read permission for '$trustee' on this GPO." -AffectedObject $gpo.Name
-                    }
-                }
-            }
-        } catch { Write-Log "  Permissions failed for '$($gpo.Name)': $_" -Level WARN }
+            $native = Invoke-WindowsPowerShellJson -Depth 4 -Script @'
+$out = foreach ($g in Get-GPO -All) {
+    foreach ($p in Get-GPPermission -Guid $g.Id -All) {
+        [pscustomobject]@{
+            GPOName     = $g.DisplayName
+            GPOId       = $g.Id.ToString().Trim('{}')
+            Trustee     = $p.Trustee.Name
+            TrusteeSid  = $p.Trustee.Sid.ToString()
+            TrusteeType = $p.Trustee.SidType.ToString()
+            Permission  = $p.Permission.ToString()
+            Denied      = [bool]$p.Denied
+        }
     }
-    Write-Progress -Activity 'GPO Permissions' -Completed
+}
+$out
+'@
+            foreach ($row in @($native)) {
+                $allPerms.Add([pscustomobject]@{
+                    GPOName     = [string]$row.GPOName
+                    GPOId       = [string]$row.GPOId
+                    Trustee     = [string]$row.Trustee
+                    TrusteeSid  = [string]$row.TrusteeSid
+                    TrusteeType = [string]$row.TrusteeType
+                    Permission  = [string]$row.Permission
+                    Denied      = [bool]$row.Denied
+                })
+            }
+        }
+        catch {
+            Write-Log "  Native permissions collection failed: $_" -Level WARN
+            $useNative = $false
+        }
+    }
+
+    if (-not $useNative) {
+        $total = Get-SafeCount $GPOInventory; $idx = 0
+        foreach ($gpo in $GPOInventory) {
+            $idx++
+            Write-Progress -Activity 'GPO Permissions' -Status "$($gpo.Name) ($idx/$total)" `
+                -PercentComplete $(if ($total -gt 0) { [int](($idx / $total) * 100) } else { 0 })
+            try {
+                $perms = @(Get-GPPermission -Guid $gpo.Id -All -EA Stop)
+                foreach ($p in $perms) {
+                    $trusteeObj = Get-ObjectProperty -InputObject $p -Name 'Trustee'
+                    if (Test-IsDeserializedTypeName -Value $trusteeObj -TypeName 'Microsoft.GroupPolicy.GPTrustee') {
+                        Write-Log "  Trustee deserialization failed for '$($gpo.Name)' — re-run under Windows PowerShell 5.1 for full ACL detail." -Level WARN
+                        break
+                    }
+                    $trustee  = [string](Get-ObjectProperty -InputObject $trusteeObj -Name 'Name' -Default '')
+                    $sidObj   = Get-ObjectProperty -InputObject $trusteeObj -Name 'Sid'
+                    $sidStr   = if ($null -ne $sidObj) { $sidObj.ToString() } else { '' }
+                    $sidType  = [string](Get-ObjectProperty -InputObject $trusteeObj -Name 'SidType' -Default '')
+                    $permStr  = [string](Get-ObjectProperty -InputObject $p -Name 'Permission' -Default '')
+                    $denied   = [bool](Get-ObjectProperty -InputObject $p -Name 'Denied' -Default $false)
+                    $allPerms.Add([pscustomobject]@{
+                        GPOName = $gpo.Name; GPOId = $gpo.Id
+                        Trustee = $trustee; TrusteeSid = $sidStr
+                        TrusteeType = $sidType.ToString(); Permission = $permStr.ToString(); Denied = $denied
+                    })
+                }
+            } catch { Write-Log "  Permissions failed for '$($gpo.Name)': $_" -Level WARN }
+        }
+        Write-Progress -Activity 'GPO Permissions' -Completed
+    }
+
+    # Findings from collected ACE rows
+    $byGpo = $allPerms | Group-Object GPOId
+    foreach ($grp in @($byGpo)) {
+        $rows = @($grp.Group)
+        $gpoName = $rows[0].GPOName
+        $gpoMeta = @($GPOInventory | Where-Object { $_.Id -eq $grp.Name } | Select-Object -First 1)
+        $status  = if ($gpoMeta) { $gpoMeta.GpoStatus } else { '' }
+
+        $applyPerms = @($rows | Where-Object { $_.Permission -eq 'GpoApply' -and -not $_.Denied })
+        if ((Get-SafeCount $applyPerms) -eq 0 -and $status -ne 'AllSettingsDisabled') {
+            Add-Finding -Severity High -Category Security `
+                -Title  "No 'Apply Group Policy' permission on '$gpoName'" `
+                -Detail 'No principal has Apply Group Policy. This GPO will never apply to any object.' `
+                -Recommendation 'Add Apply Group Policy to Authenticated Users or a targeted security group.' `
+                -AffectedObject $gpoName
+        }
+
+        foreach ($p in $rows) {
+            $trustee = $p.Trustee; $permStr = $p.Permission; $sidType = $p.TrusteeType
+            if ($sidType -eq 'Unknown' -or $trustee -match '^S-1-') {
+                Add-Finding -Severity Medium -Category Security -Title "Unresolved SID on '$gpoName'" `
+                    -Detail "SID: $($p.TrusteeSid) | Permission: $permStr" `
+                    -Recommendation 'Remove the orphaned SID from the GPO ACL.' -AffectedObject $gpoName
+            }
+            if ($trustee -match '^Everyone$|^Anonymous') {
+                Add-Finding -Severity High -Category Security -Title "Overly broad permission on '$gpoName'" `
+                    -Detail "'$trustee' has '$permStr'." `
+                    -Recommendation "Remove 'Everyone' or 'Anonymous' from this GPO's ACL." -AffectedObject $gpoName
+            }
+            if ($permStr -in 'GpoEdit','GpoEditDeleteModifySecurity') {
+                if ($trustee -notmatch 'Domain Admins|Enterprise Admins|Group Policy Creator Owners|SYSTEM|Administrators') {
+                    Add-Finding -Severity High -Category Security -Title "Non-standard editor on '$gpoName'" `
+                        -Detail "'$trustee' has '$permStr'." `
+                        -Recommendation "Confirm '$trustee' requires edit rights." -AffectedObject $gpoName
+                }
+            }
+            if ($permStr -eq 'GpoApply') {
+                $hasRead = @($rows | Where-Object { $_.Trustee -eq $trustee -and $_.Permission -eq 'GpoRead' })
+                if ((Get-SafeCount $hasRead) -eq 0) {
+                    Add-Finding -Severity Medium -Category Security -Title "Apply without Read on '$gpoName'" `
+                        -Detail "'$trustee' has Apply but not Read." `
+                        -Recommendation "Add Read permission for '$trustee' on this GPO." -AffectedObject $gpoName
+                }
+            }
+        }
+    }
+
     $allPerms | Export-Csv (Join-Path $RawDataDir 'GPO_Permissions.csv') -NoTypeInformation -Force
     $allPerms | ConvertTo-Json -Depth 3 | Out-File (Join-Path $RawDataDir 'GPO_Permissions.json') -Encoding UTF8 -Force
     Write-Log "  Permissions audit complete: $($allPerms.Count) ACE record(s)." -Level SUCCESS
-    return $allPerms
+    return , @($allPerms.ToArray())
 }
 
 #endregion
@@ -1137,13 +1439,15 @@ function Get-WMIFilterAudit {
     } catch { Write-Log "  WMI filter enumeration failed: $_" -Level WARN }
 
     foreach ($gpo in $GPOInventory) {
-        if (-not [string]::IsNullOrEmpty($gpo.WmiFilter)) {
-            $m = $wmiFilters | Where-Object { $_.Name -eq $gpo.WmiFilter }
+        $wmiRef = Get-ObjectProperty -InputObject $gpo -Name 'WmiFilter' -Default ''
+        if (-not [string]::IsNullOrEmpty([string]$wmiRef)) {
+            $m = @($wmiFilters | Where-Object { $_.Name -eq $wmiRef } | Select-Object -First 1)
+            $gpoName = Get-ObjectProperty -InputObject $gpo -Name 'Name' -Default 'Unknown'
             if (-not $m) {
-                Add-Finding -Severity High -Category WMIFilters -Title "Broken WMI filter ref on '$($gpo.Name)'" `
-                    -Detail "GPO references WMI filter '$($gpo.WmiFilter)' which does not exist." `
-                    -Recommendation 'Fix or remove the broken WMI filter reference. GPO will not apply until corrected.' -AffectedObject $gpo.Name
-            } else { $m.UsedByGPOs.Add($gpo.Name) }
+                Add-Finding -Severity High -Category WMIFilters -Title "Broken WMI filter ref on '$gpoName'" `
+                    -Detail "GPO references WMI filter '$wmiRef' which does not exist." `
+                    -Recommendation 'Fix or remove the broken WMI filter reference. GPO will not apply until corrected.' -AffectedObject $gpoName
+            } else { $m.UsedByGPOs.Add([string]$gpoName) }
         }
     }
     $wmiFilters | Where-Object { $_.UsedByGPOs.Count -eq 0 } | ForEach-Object {
