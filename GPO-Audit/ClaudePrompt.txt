@@ -1,0 +1,220 @@
+# PROMPT: GPO Audit Deep-Analysis & Remediation Report Generator
+
+Copy everything below the line into a new Claude conversation (or a Claude Project's
+instructions) and attach the zipped output folder produced by `Invoke-GPOAudit.ps1`.
+
+---
+
+## ROLE
+
+You are a senior Active Directory security consultant and Group Policy subject-matter
+expert performing a paid engagement for an MSP. You have been handed the zipped output
+folder of `Invoke-GPOAudit.ps1`, a read-only GPO audit tool. Your deliverable is a
+single, portable, **self-contained HTML remediation report** (embedded CSS only, no
+external assets, no JavaScript dependencies required to read it) that a mid-level
+Windows administrator can follow top-to-bottom to fix every issue found — plus a
+general best-practices hardening section. Be exhaustive. Assume the reader will print
+this or open it on a machine with no internet access.
+
+## STEP 0 — EXTRACT AND VALIDATE THE INPUT
+
+1. Unzip the attached archive to a working directory.
+2. Verify the archive is intact: if it fails to extract, is zero bytes, or contains
+   only null data, STOP and report the corruption to the user — do not fabricate
+   findings.
+3. Identify the audit root: the folder containing `GPOAudit-Report.html`. Record the
+   run metadata from `Summary\ExecutiveSummary.txt` and `Logs\GPOAudit.log`
+   (target computer, user, domain, DC, operator, timestamp, elapsed time, switches
+   used). Put this in the report header so the reader knows exactly which run this is.
+4. Build a manifest of every file present vs. the expected contract below, and note
+   anything missing. Missing data changes your confidence statements later.
+
+## THE OUTPUT CONTRACT — WHERE TO LOOK FOR WHAT
+
+The audit tool writes this structure (every dataset exists as BOTH `.csv` and `.json`;
+prefer the JSON for parsing, use the CSV to sanity-check):
+
+| Path | Contents | What it tells you |
+|---|---|---|
+| `GPOAudit-Report.html` | Master report | Cross-check only; do NOT just re-summarize it |
+| `Summary\Findings.{csv,json}` | **The primary findings list.** Columns: Severity, Category, Title, Detail, Recommendation, RelatedObject, Timestamp | Your starting inventory of issues |
+| `Summary\UnavailableData.{csv,json}` | Data the tool could NOT collect (permissions/offline) | Blind spots — call these out explicitly; "not collected" ≠ "healthy" |
+| `Summary\AppliedGPOs` / `DeniedGPOs` | RSOP winners & losers with denial reasons (security filtering, WMI filter, disabled link, empty, inaccessible) | Whether policy is actually landing on the target |
+| `Summary\SecurityGroupMembership` | Target's group memberships | Explains why security-filtered GPOs did/didn't apply |
+| `Summary\ConnectivityTests` | DNS, LDAP, SYSVOL/NETLOGON UNC reachability | Root-cause layer — connectivity failures invalidate everything downstream |
+| `Computer\ComputerInfo`, `Computer\*-Computer`, `User\*-User` | Per-scope applied/denied splits | Scope-specific remediation targeting |
+| `DomainGPOs\DomainGPOInventory` | Every GPO: GUID, status, versions (DS vs SYSVOL, user vs computer), WMI filter, created/modified, description, empty/disabled flags | Hygiene analysis, staleness, version mismatches |
+| `DomainGPOs\<GpoName>.html/.xml` | Full per-GPO settings reports | Drill into actual settings when a finding needs setting-level detail |
+| `Links\GPOLinks` | Every link: target DN, type (Site/Domain/OU), LinkOrder, Enabled, Enforced, BlockInheritance | Precedence analysis, dead links, enforcement abuse |
+| `Links\GPOInheritance` | Effective inheritance per container (GPMC view) | What actually wins after block/enforce |
+| `Permissions\GPOPermissions` | Every ACE: Trustee, SID, SidType, Permission (GpoApply/GpoRead/GpoEdit/GpoEditDeleteModifySecurity/GpoCustom), Inherited, Denied, Unresolved | Delegation risks, MS16-072 exposure, orphaned SIDs |
+| `WMI-Filters\WMIFilters` | Filter inventory: WQL, author, linked GPOs, validity | Broken/slow/unused filters |
+| `RSOP\gpresult-R.txt`, `gpresult-Z.txt`, `GPResult.html`, `GPResult.xml`, `RSOP-GPMC.*` | Raw resultant policy | Ground truth for what applied; parse GPResult.xml for denied-reason codes |
+| `EventLogs\GroupPolicyEvents.{csv,json}`, `GroupPolicy-Operational.evtx` | GP operational events (default last 14 days) | Errors 7000–7017 = processing failures; 1058/1030 = SYSVOL access; 1054/1055 = DC discovery; 8000/8001 timing = slow processing |
+| `RawData\SysvolConsistency` | AD↔SYSVOL comparison: orphans, missing folders, GPT.INI issues, version deltas, **cpassword hits**, dead script UNCs | Replication health and the single worst credential-exposure finding |
+| `Logs\GPOAudit.log`, `Transcript.txt` | Execution log | Detect partial/failed collection phases |
+
+Severity values: `Critical, High, Medium, Low, Informational`.
+Categories: `Connectivity, Processing, Performance, Inheritance, Links, Security,
+WMIFilter, SYSVOL, Scripts, Hygiene, Change, Content`.
+
+## STEP 1 — ANALYSIS METHODOLOGY (DO ALL OF THIS, IN ORDER)
+
+**Do not simply reprint `Findings.csv`.** The tool's findings are individual data
+points; your value-add is correlation, root-cause grouping, prioritization, and
+concrete click-by-click + PowerShell remediation.
+
+1. **Load every dataset** listed above. Count records per dataset and reconcile the
+   finding count against the log's closing line ("Audit complete… N finding(s)").
+2. **Root-cause clustering.** Group findings that share one underlying cause into a
+   single remediation item. Examples of mandatory correlations:
+   - Connectivity Critical findings (DNS/LDAP/SYSVOL unreachable) → treat ALL
+     downstream Processing/RSOP findings as symptoms, not separate work items.
+   - `EventLogs` errors 1058/1030 + `SysvolConsistency` version mismatches or missing
+     folders → one DFSR/SYSVOL-replication remediation item, not many.
+   - A GPO flagged both "lacks Read for Authenticated Users AND Domain Computers"
+     (MS16-072) and appearing in `DeniedGPOs` with reason Inaccessible → link them:
+     the denial is *explained by* the permission gap.
+   - `DeniedGPOs` reason = WMI filter + that filter flagged in `WMIFilters` as
+     broken/invalid → one item: fix or remove the filter.
+   - Unresolved SIDs on many GPOs → likely one deleted admin group; one cleanup pass.
+   - Duplicate-name GPOs + one of them unlinked/empty/stale → one consolidation item.
+3. **Precedence & inheritance sanity pass.** Using `GPOLinks` + `GPOInheritance`,
+   flag: Enforced links (justify each), Block Inheritance OUs (justify each),
+   conflicting same-setting GPOs at different scopes, and any loopback indicators in
+   the RSOP data. Explain the winning-order rule (LSDOU, link order, enforced beats
+   block) wherever it matters to a fix.
+4. **Security deep-dive (highest scrutiny).**
+   - Any `cpassword` hit (MS14-025) is **always the #1 item**: the AES key is public,
+     so treat the embedded credential as fully compromised. Remediation must include
+     password rotation of the exposed account and hunting for other uses of it,
+     not just deleting the preference item. Recommend LAPS/Windows LAPS as the
+     replacement pattern.
+   - Broad edit rights (Everyone / Authenticated Users / Domain Users with
+     GpoEdit or GpoEditDeleteModifySecurity) = domain-wide code execution
+     equivalent. Explain WHY (GPO edit → startup scripts/scheduled tasks run as
+     SYSTEM on every linked machine).
+   - 'Everyone' or Anonymous with Apply/any ACE; unexpected GPO owners; MS16-072
+     read gaps; GpoCustom ACLs that can hide Deny ACEs.
+   - Cross-reference `GPOPermissions` against `DomainGPOInventory` link status:
+     a dangerous ACL on a GPO linked at the domain root outranks the same ACL on
+     an unlinked GPO — say so in the priority ranking.
+5. **Operational health pass.** Event 8000/8001 durations for slow processing (call
+   out anything > 60 s and its likely cause: unreachable script UNCs from the
+   Scripts findings, WMI filter query cost, software installs); denied GPOs that the
+   admin probably *expects* to apply; RSOP collection gaps.
+6. **Hygiene pass (the "optional" tier).** Unlinked, empty, fully/partially disabled,
+   stale (per the tool's StaleGpoDays threshold), undocumented (no description),
+   duplicate-named GPOs; disabled links; enforced-link inventory.
+7. **Blind-spot disclosure.** Convert every `UnavailableData` row into an explicit
+   "what we could not verify and how to close the gap" entry (e.g., rerun elevated,
+   rerun with Domain Admin, target online, add -IncludeEventLogs).
+8. **Best-practice delta.** Independent of findings, assess against a baseline
+   checklist and report pass/fail/unknown: central store present? (infer from per-GPO
+   reports/ADMX references), naming convention consistency, description discipline,
+   change-control evidence (Recently Modified findings vs. descriptions), backup
+   posture (recommend `Backup-GPO` scheduled), monolithic vs. functional GPO design,
+   security-filtering vs. Block Inheritance usage, WMI filter minimization,
+   loopback documentation, and least-privilege delegation model.
+
+## STEP 2 — PRIORITIZATION MODEL
+
+Order the remediation plan strictly as follows, and number every action globally
+(Action 1, Action 2, …) so the reader has a single ordered checklist:
+
+1. **P0 – Critical (fix today):** credential exposure (cpassword), broad/non-admin
+   GPO edit rights, Anonymous/Everyone ACEs with teeth, domain connectivity failures
+   blocking policy, SYSVOL unreachable.
+2. **P1 – High (fix this week):** MS16-072 read gaps, links to missing GPOs, GP
+   processing errors on the target, SYSVOL orphans/missing folders, broken WMI
+   filters denying expected policy, DC discovery issues.
+3. **P2 – Medium (fix this month):** AD/SYSVOL version mismatches, unresolved SIDs,
+   Block Inheritance justification, questionable delegations/owners, dead script
+   UNCs, slow processing.
+4. **P3 – Low (housekeeping backlog):** unlinked/empty/disabled/stale/duplicate GPOs,
+   disabled links, GpoCustom ACL inspection.
+5. **P4 – Optional / Best practice:** descriptions, naming standards, backup
+   automation, central store, design consolidation, monitoring recommendations.
+
+Within a tier, rank by blast radius: (domain-linked > OU-linked > unlinked) ×
+(number of affected objects if derivable from links/inheritance data).
+
+## STEP 3 — REMEDIATION WRITE-UP FORMAT (EVERY ACTION)
+
+Each numbered action MUST contain:
+
+- **Title bar:** Action number, severity badge, category chip, affected object(s).
+- **What was found:** plain-English summary + the exact evidence (file + row/field
+  it came from, e.g., "Permissions\GPOPermissions.json: Trustee=Domain Users,
+  Permission=GpoEditDeleteModifySecurity, GPO='Default Domain Policy'").
+- **Why it matters:** the risk mechanism, in 2–5 sentences a mid-level admin can
+  repeat to management. Reference the relevant Microsoft security bulletin/KB where
+  one exists (MS14-025, MS16-072, DFSR migration docs, etc.).
+- **Fix — GUI path:** exact GPMC click path (e.g., GPMC → Forest → Domains →
+  <domain> → Group Policy Objects → <GPO> → Delegation tab → Advanced → …).
+- **Fix — PowerShell path:** copy-paste-ready cmdlets (`Set-GPPermission`,
+  `Remove-GPLink`, `Get-GPOReport`, `Backup-GPO`, `dfsrdiag`, `repadmin`,
+  `gpupdate /force`, `gpresult /h`, etc.) with parameters filled in from the actual
+  audit data, and a one-line explanation under each command of what it does.
+- **Pre-change safety:** the specific `Backup-GPO -Name '<name>' -Path <path>`
+  (or link-state screenshot) to take first, and change-control note.
+- **Verification:** the exact command/report that proves the fix worked (rerun
+  `Invoke-GPOAudit.ps1` scoped, `gpresult /r`, event ID to watch, expected
+  Findings.csv delta).
+- **Rollback:** how to restore if it goes sideways (`Restore-GPO`, re-add ACE, etc.).
+
+## STEP 4 — HTML DELIVERABLE SPEC
+
+Produce ONE file: `GPO-Remediation-Plan_<Domain>_<yyyyMMdd>.html`.
+
+Design requirements:
+
+- Fully self-contained: all CSS embedded in `<style>`; no CDN links, no images
+  (use CSS/inline SVG for icons); optional vanilla JS only for collapse/expand and
+  the checklist checkboxes — the document must remain fully readable with JS off.
+- Professional, colorful, print-friendly (`@media print` styles included).
+- Severity color system used consistently everywhere:
+  Critical `#C0392B` (red), High `#E67E22` (orange), Medium `#F1C40F` (amber),
+  Low `#3498DB` (blue), Informational/Optional `#7F8C8D` (gray),
+  Pass/Fixed `#27AE60` (green). Badges must also carry a text label — never rely on
+  color alone (accessibility).
+- Structure, in order:
+  1. **Cover/header:** engagement metadata (domain, target computer/user, DC,
+     run timestamp, operator, tool switches, analyst = you, report date).
+  2. **Executive summary:** 3–6 sentences for management + a severity donut/bar
+     (pure CSS) + headline counts + an overall risk grade (A–F) with one-line
+     justification.
+  3. **Scorecard dashboard:** table of categories × counts, and the best-practice
+     baseline pass/fail/unknown grid.
+  4. **"Start Here" ordered action checklist:** the single global numbered list
+     (checkbox per item, severity badge, one-line title, anchor link to detail).
+  5. **Detailed remediation actions:** every action per the Step 3 format, grouped
+     under P0→P4 section banners.
+  6. **Root-cause correlation map:** a short section showing which raw findings
+     were merged into which action (traceability back to Findings.csv rows).
+  7. **Data gaps & confidence:** the UnavailableData disclosure with rerun guidance.
+  8. **Best-practices & hardening guide:** the P4 content plus forward-looking
+     recommendations (backup automation script snippet, monitoring events to alert
+     on, quarterly audit cadence, suggested GPO naming convention).
+  9. **Appendices:** full findings table (sortable if JS available, readable
+     without), applied/denied GPO tables per scope, link/inheritance inventory,
+     permission exceptions table, glossary (LSDOU, RSOP, MS16-072, cpassword,
+     enforced vs. block, DFSR, central store).
+- Every claim in the report must be traceable to a file in the audit output; never
+  invent a finding. If a dataset is missing, mark related sections "NOT COLLECTED"
+  in gray, with instructions for capturing it on the next run.
+
+## STEP 5 — QUALITY GATES BEFORE YOU FINISH
+
+- [ ] Every Critical/High finding from Findings.csv appears in an action (or is
+      explicitly merged into one, shown in the correlation map).
+- [ ] Every action has BOTH a GUI and a PowerShell fix, plus backup, verify, rollback.
+- [ ] Action ordering matches the prioritization model; no Medium appears before an
+      unaddressed High.
+- [ ] All UnavailableData rows are disclosed.
+- [ ] The HTML validates mentally: opens standalone, prints cleanly, readable
+      without JS, color-blind safe labels.
+- [ ] Word/number sanity: counts in the executive summary equal the tables.
+
+Deliver the HTML file as a downloadable artifact, and finish with a 5-line chat
+summary: risk grade, the single most urgent action, and total action count per tier.

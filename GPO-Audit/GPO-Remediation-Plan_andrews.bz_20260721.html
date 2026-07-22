@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>GPO Remediation Plan — andrews.bz — 2026-07-21</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+:root {
+  --crit:#C0392B; --high:#E67E22; --med:#F1C40F; --low:#3498DB; --info:#7F8C8D; --pass:#27AE60;
+  --ink:#1C2733; --ink2:#43525F; --paper:#FBFCFD; --panel:#FFFFFF; --line:#D8DFE6;
+  --slate:#243B53; --slate2:#102A43;
+}
+* { box-sizing:border-box; }
+body { margin:0; background:var(--paper); color:var(--ink);
+  font:15px/1.55 Constantia,"Palatino Linotype",Palatino,Georgia,serif; }
+code,pre,.mono { font-family:Consolas,"Cascadia Mono",Menlo,monospace; font-size:.92em; }
+h1,h2,h3,h4,summary { font-family:"Segoe UI",Calibri,Arial,sans-serif; }
+.wrap { max-width:1080px; margin:0 auto; padding:0 28px 60px; }
+header.cover { background:linear-gradient(135deg,var(--slate2),var(--slate)); color:#EAF2F9; padding:44px 0 34px; }
+header.cover .wrap { padding-bottom:0; }
+.eyebrow { letter-spacing:.22em; text-transform:uppercase; font-size:12px; color:#9FB8CC;
+  font-family:"Segoe UI",Calibri,sans-serif; }
+h1 { font-size:32px; margin:8px 0 4px; font-weight:650; }
+.subtitle { color:#C3D5E4; margin:0 0 22px; }
+.meta { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:2px;
+  background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.15); border-radius:8px; overflow:hidden; }
+.meta div { padding:9px 14px; background:rgba(255,255,255,.04); font-size:13.5px; }
+.meta b { display:block; font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:#8FA9BE;
+  font-family:"Segoe UI",sans-serif; }
+h2 { font-size:22px; margin:44px 0 12px; padding-bottom:6px; border-bottom:2px solid var(--slate);
+  color:var(--slate2); }
+h2 .sect-no { color:#8494A3; font-weight:400; margin-right:8px; }
+h3 { font-size:17px; color:var(--slate2); }
+h4 { font-size:13px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink2); margin:18px 0 4px; }
+.badge { display:inline-block; border-radius:3px; padding:1px 9px 2px; font:600 11.5px/1.6 "Segoe UI",sans-serif;
+  letter-spacing:.04em; text-transform:uppercase; vertical-align:middle; }
+.chip { display:inline-block; border:1px solid var(--line); border-radius:12px; padding:0 9px; font:600 11.5px/1.7
+  "Segoe UI",sans-serif; color:var(--ink2); background:#F1F5F8; vertical-align:middle; }
+table { border-collapse:collapse; width:100%; margin:10px 0 18px; font-size:13.5px; background:var(--panel); }
+th { background:var(--slate); color:#EAF2F9; text-align:left; padding:7px 10px; font:600 12px "Segoe UI",sans-serif;
+  letter-spacing:.03em; }
+td { border:1px solid var(--line); padding:6px 10px; vertical-align:top; }
+tbody tr:nth-child(even) { background:#F4F8FB; }
+.grade-row { display:flex; gap:26px; align-items:center; flex-wrap:wrap; margin:18px 0; }
+.donut { width:150px; height:150px; border-radius:50%; background:conic-gradient(#E67E22 0.0deg 32.7deg,#F1C40F 32.7deg 98.2deg,#3498DB 98.2deg 229.1deg,#7F8C8D 229.1deg 360.0deg); position:relative; flex:none; }
+.donut::after { content:"11\A actions"; white-space:pre; position:absolute; inset:30px; background:var(--paper);
+  border-radius:50%; display:flex; align-items:center; justify-content:center; text-align:center;
+  font:700 15px/1.2 "Segoe UI",sans-serif; color:var(--slate2); }
+.grade { font:800 58px/1 "Segoe UI",sans-serif; color:var(--high); }
+.legend span { display:inline-block; margin:2px 12px 2px 0; font-size:13px; }
+.legend i { display:inline-block; width:11px; height:11px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+.checklist { list-style:none; padding:0; }
+.checklist li { padding:7px 10px; border:1px solid var(--line); border-left-width:4px; background:var(--panel);
+  margin:5px 0; border-radius:4px; display:flex; gap:10px; align-items:baseline; }
+.checklist input { transform:translateY(2px); }
+.checklist a { color:var(--slate2); text-decoration:none; font-weight:600; font-family:"Segoe UI",sans-serif; font-size:14px; }
+.checklist a:hover { text-decoration:underline; }
+.tier { margin-top:26px; }
+.tier h3 { background:var(--slate2); color:#EAF2F9; padding:8px 14px; border-radius:5px; }
+.tier-P0 h3 { background:var(--crit); } .tier-P1 h3 { background:var(--high); }
+.tier-P2 h3 { background:#B8960E; } .tier-P3 h3 { background:var(--low); }
+.pass-note { color:var(--pass); font-weight:600; font-family:"Segoe UI",sans-serif; }
+details.action { border:1px solid var(--line); border-radius:6px; background:var(--panel); margin:14px 0; }
+details.action summary { cursor:pointer; padding:11px 14px; font-size:15px; display:flex; gap:9px;
+  align-items:baseline; flex-wrap:wrap; }
+details.action summary::-webkit-details-marker { display:none; }
+.anum { font:800 14px "Segoe UI",sans-serif; color:var(--slate2); }
+.atitle { font-weight:650; }
+.aobj { flex-basis:100%; color:var(--ink2); font-size:12.5px; font-family:Consolas,monospace; }
+.abody { padding:2px 18px 16px; border-top:1px solid var(--line); }
+pre { background:#102A43; color:#D9E9F5; padding:10px 13px; border-radius:5px; overflow-x:auto; margin:8px 0 2px; }
+.cmdnote { margin:2px 0 12px; font-size:13px; color:var(--ink2); font-style:italic; }
+.trace { font-size:12.5px; color:var(--ink2); border-top:1px dashed var(--line); padding-top:8px; margin-top:16px; }
+.muted { color:var(--info); }
+.callout { border-left:4px solid var(--low); background:#EDF4FA; padding:10px 14px; border-radius:0 5px 5px 0;
+  margin:14px 0; }
+.notcollected { color:var(--info); font-weight:700; }
+footer { margin-top:50px; padding-top:14px; border-top:1px solid var(--line); font-size:12.5px; color:var(--ink2); }
+@media print {
+  body { font-size:11.5px; background:#fff; }
+  header.cover { background:var(--slate2)!important; -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  details.action { break-inside:avoid; } details:not([open])>*:not(summary) { display:block; }
+  .donut,.badge,th,.tier h3,pre { -webkit-print-color-adjust:exact; print-color-adjust:exact; }
+  a { color:inherit; text-decoration:none; }
+}
+</style></head><body>
+
+<header class="cover"><div class="wrap">
+<div class="eyebrow">Group Policy Audit — Deep Analysis &amp; Remediation Engagement</div>
+<h1>GPO Remediation Plan — andrews.bz</h1>
+<p class="subtitle">Correlated analysis of two Invoke-GPOAudit.ps1 runs · prepared for Houston Information Team, LLC</p>
+<div class="meta">
+<div><b>Domain / DC</b>andrews.bz · DC01.andrews.bz (site Default-First-Site-Name)</div>
+<div><b>Run 1 — DC01</b>2026-07-21 20:11:19–20:11:36 (00:16) · target: dc01 (remote) · operator ANDREWS\Administrator · switches: -ComputerName dc01 -IncludeDomainInventory -IncludeEventLogs -IncludeSecurityAudit -OpenReport</div>
+<div><b>Run 2 — W2022</b>2026-07-21 20:14:16–20:14:46 (00:29) · target: W2022 (local) · operator ANDREWS\Administrator · switches: -InstallPrerequisites -IncludeDomainInventory -IncludeEventLogs</div>
+<div><b>Tool platform</b>PowerShell 5.1.20348 on Windows Server 2022 Standard (build 20348); GroupPolicy + ActiveDirectory native modules; elevated</div>
+<div><b>Findings reconciled</b>10 findings per run (log closing lines: “10 finding(s)”) = 20 raw rows, deduplicating to 10 unique findings; 3 + 1 items unavailable</div>
+<div><b>Analyst / report date</b>Claude (senior AD security consultant engagement) · 2026-07-21</div>
+</div></div></header>
+
+<div class="wrap">
+
+<h2><span class="sect-no">1</span>Executive summary</h2>
+<p>The andrews.bz domain’s Group Policy <em>plumbing</em> is healthy: all seven connectivity tests pass on both
+targets, AD and SYSVOL agree exactly (2 GPOs = 2 folders, no version drift, no orphans), the cpassword credential
+scan is clean, MS16-072 read access is intact, delegation is tight, and 10,000 analyzed operational events contain
+zero processing errors. The <em>policy content</em>, however, is another story: this domain runs entirely on two
+untouched 2022-era default GPOs — account lockout is disabled outright, the minimum password length is 7, and no
+hardening baseline, LAPS, central store, or backup regime exists. Nothing here is on fire; the risk is what has
+never been configured. Eleven actions below fix the two genuine security weaknesses this week, close a latent DNS
+reliability trap, and stand up the hygiene scaffolding a managed domain should have.</p>
+
+<div class="grade-row">
+  <div class="donut" role="img" aria-label="Action severity distribution: 1 High, 2 Medium, 4 Low, 4 Optional"></div>
+  <div>
+    <div style="font:600 13px 'Segoe UI',sans-serif;color:var(--ink2)">OVERALL RISK GRADE</div>
+    <div class="grade">C+</div>
+    <div style="max-width:420px">Sound infrastructure and no exploitable exposure found, held back by absent
+    account-lockout/password hardening and a defaults-only security posture.</div>
+  </div>
+  <div class="legend">
+    <div style="font:600 13px 'Segoe UI',sans-serif;color:var(--ink2)">HEADLINE COUNTS</div>
+    <span><i style="background:#C0392B"></i>Critical: 0</span>
+    <span><i style="background:#E67E22"></i>High: 1</span>
+    <span><i style="background:#F1C40F"></i>Medium: 2</span><br>
+    <span><i style="background:#3498DB"></i>Low: 4</span>
+    <span><i style="background:#7F8C8D"></i>Optional: 4</span>
+    <span><i style="background:#27AE60"></i>Baseline passes: 8</span>
+    <div style="font-size:13px;margin-top:6px">Tool findings: 10 unique (0 Critical / 0 High / 0 Medium / 6 Low / 4 Informational) · Analyst-derived items: 8</div>
+  </div>
+</div>
+
+<h2><span class="sect-no">2</span>Scorecard dashboard</h2>
+<h3>Tool findings by category (identical across both runs)</h3>
+<table><thead><tr><th>Category</th><th>Critical</th><th>High</th><th>Medium</th><th>Low</th><th>Informational</th></tr></thead>
+<tbody><tr><td>Security</td><td>0</td><td>0</td><td>0</td><td>4</td><td>2</td></tr><tr><td>Hygiene</td><td>0</td><td>0</td><td>0</td><td>2</td><td>2</td></tr></tbody></table>
+<h3>Best-practice baseline assessment</h3>
+<table><thead><tr><th>Baseline check</th><th>Status</th><th>Evidence / linked action</th></tr></thead>
+<tbody><tr><td>Connectivity to DC / DNS / LDAP / SYSVOL / NETLOGON</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>All 7 tests succeeded in both runs (ConnectivityTests.csv) — with the apex-DNS caveat in Action 3.</td></tr><tr><td>cpassword / GPP credential exposure (MS14-025)</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>“No cpassword values found in scanned preference XML files” — GPOAudit.log, both runs.</td></tr><tr><td>MS16-072 read access (Auth Users / Domain Computers)</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>Authenticated Users hold Read+Apply on both GPOs; Enterprise Domain Controllers hold Read (GPOPermissions.csv). No read gaps.</td></tr><tr><td>Dangerous delegation (Everyone/Anon/broad edit rights)</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>No Everyone/Anonymous ACEs; edit rights limited to SYSTEM, Domain Admins, Enterprise Admins.</td></tr><tr><td>AD ↔ SYSVOL consistency (orphans, GPT.INI, versions)</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>2 AD objects = 2 SYSVOL folders; SysvolConsistency.csv empty (no discrepancies); VersionMismatch=False on both GPOs.</td></tr><tr><td>GP processing errors on targets (7000s, 1058/1030, 1054/1055)</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>0 error-level events in 5,000 analyzed per host; only warning is 6314 (Action 6).</td></tr><tr><td>Account lockout policy</td><td><span class="badge" style="background:#E67E22;color:#fff">Fail</span></td><td>LockoutBadCount=0 — Action 1.</td></tr><tr><td>Password policy vs. modern baseline (14+ chars)</td><td><span class="badge" style="background:#E67E22;color:#fff">Fail</span></td><td>MinimumPasswordLength=7 — Action 2.</td></tr><tr><td>Security baseline GPOs / hardening beyond defaults</td><td><span class="badge" style="background:#E67E22;color:#fff">Fail</span></td><td>Only the 2 default GPOs exist — Action 10.</td></tr><tr><td>LAPS deployed</td><td><span class="badge" style="background:#7F8C8D;color:#fff">Unknown</span></td><td>Not detectable from GPO data; no LAPS GPO exists, so effectively absent — Action 10.</td></tr><tr><td>ADMX Central Store</td><td><span class="badge" style="background:#7F8C8D;color:#fff">Unknown</span></td><td>No Administrative Templates in use to test against; assume absent — Action 9.</td></tr><tr><td>GPO backup automation</td><td><span class="badge" style="background:#7F8C8D;color:#fff">Unknown</span></td><td>No evidence in scope — Action 11.</td></tr><tr><td>Naming convention / description discipline</td><td><span class="badge" style="background:#E67E22;color:#fff">Fail</span></td><td>Both GPOs undocumented — Action 8.</td></tr><tr><td>Enforced links / Block Inheritance abuse</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>GPOLinks.csv: 0 enforced links, 0 blocked-inheritance containers.</td></tr><tr><td>WMI filter hygiene</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>0 WMI filters exist (WMIFilters.csv) — nothing to break or slow processing.</td></tr><tr><td>Unresolved SIDs / orphaned trustees</td><td><span class="badge" style="background:#27AE60;color:#fff">Pass</span></td><td>Unresolved=False on all 10 ACEs.</td></tr><tr><td>Change control evidence</td><td><span class="badge" style="background:#E67E22;color:#fff">Fail</span></td><td>No descriptions, no modifications in 1,545 days, no backup regime — Actions 5, 8, 11.</td></tr></tbody></table>
+
+<h2><span class="sect-no">3</span>Start here — ordered action checklist</h2>
+<p>Work top to bottom. There are <strong>no P0 items</strong> — nothing requires same-day emergency response.</p>
+<ol class="checklist"><li><input type="checkbox" id="ck1"><label for="ck1"><span class="badge" style="background:#E67E22;color:#fff">High</span> <a href="#action-1">Action 1: Enable an account lockout policy (lockout is currently disabled domain-wide)</a></label></li><li><input type="checkbox" id="ck2"><label for="ck2"><span class="badge" style="background:#F1C40F;color:#1a1a1a">Medium</span> <a href="#action-2">Action 2: Raise the password policy from 2022 factory defaults (minimum length 7)</a></label></li><li><input type="checkbox" id="ck3"><label for="ck3"><span class="badge" style="background:#F1C40F;color:#1a1a1a">Medium</span> <a href="#action-3">Action 3: Investigate public IP addresses returned for the AD domain apex name</a></label></li><li><input type="checkbox" id="ck4"><label for="ck4"><span class="badge" style="background:#3498DB;color:#fff">Low</span> <a href="#action-4">Action 4: Inspect the four “GpoCustom” ACL entries and confirm they match factory defaults</a></label></li><li><input type="checkbox" id="ck5"><label for="ck5"><span class="badge" style="background:#3498DB;color:#fff">Low</span> <a href="#action-5">Action 5: Perform and document a deliberate review of the two stale default GPOs</a></label></li><li><input type="checkbox" id="ck6"><label for="ck6"><span class="badge" style="background:#3498DB;color:#fff">Low</span> <a href="#action-6">Action 6: Review recurring warning 6314 (bandwidth estimation failed, assuming fast link)</a></label></li><li><input type="checkbox" id="ck7"><label for="ck7"><span class="badge" style="background:#3498DB;color:#fff">Low</span> <a href="#action-7">Action 7: Close the data-collection gaps so the next audit is complete</a></label></li><li><input type="checkbox" id="ck8"><label for="ck8"><span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <a href="#action-8">Action 8: Add owner/purpose descriptions and adopt a naming convention</a></label></li><li><input type="checkbox" id="ck9"><label for="ck9"><span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <a href="#action-9">Action 9: Create the ADMX Central Store</a></label></li><li><input type="checkbox" id="ck10"><label for="ck10"><span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <a href="#action-10">Action 10: Deploy security baseline GPOs and Windows LAPS (the domain runs on defaults alone)</a></label></li><li><input type="checkbox" id="ck11"><label for="ck11"><span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <a href="#action-11">Action 11: Automate GPO backups and monitor the events that matter</a></label></li></ol>
+
+<h2><span class="sect-no">4</span>Detailed remediation actions</h2>
+<section class="tier tier-P0"><h3>P0 — Critical (fix today)</h3><p class="pass-note">No actions in this tier — no findings met this severity.</p></section><section class="tier tier-P1"><h3>P1 — High (fix this week)</h3>
+<details class="action" id="action-1" open>
+<summary><span class="anum">Action 1</span> <span class="badge" style="background:#E67E22;color:#fff">High</span> <span class="chip">Security</span>
+<span class="atitle">Enable an account lockout policy (lockout is currently disabled domain-wide)</span><span class="aobj">Default Domain Policy — Account Lockout Policy</span></summary>
+<div class="abody">
+<h4>What was found</h4><p>The exported settings report for the Default Domain Policy shows <code>LockoutBadCount&nbsp;=&nbsp;0</code>
+   (evidence: <code>DomainGPOs\Default Domain Policy_31b2f340.xml</code>, Account Lockout Policy section, present
+   in both run folders). A value of 0 means account lockout is <em>disabled</em>: an attacker can attempt an
+   unlimited number of passwords against any account, online, forever. This is the 2022-era factory default —
+   the GPO has never been modified since domain creation (ModificationTime 04/28/2022).</p>
+<h4>Why it matters</h4><p>With no lockout threshold, password-spray and brute-force attacks against exposed services (SMB, LDAP,
+   RDP, or anything federated to AD) never trip a defensive control and generate far less obvious telemetry.
+   Combined with the 7-character minimum password length (Action&nbsp;2), the domain's only real defense against
+   online guessing is password complexity. Microsoft's security baseline for Windows Server recommends a lockout
+   threshold of 10 or fewer invalid attempts with a 15-minute duration/reset window.</p>
+<h4>Fix — GUI path</h4><p>GPMC → Forest: andrews.bz → Domains → andrews.bz → Group Policy Objects → <strong>Default Domain
+   Policy</strong> → right-click → Edit → Computer Configuration → Policies → Windows Settings → Security
+   Settings → Account Policies → <strong>Account Lockout Policy</strong>. Set: <em>Account lockout threshold</em>
+   = 10 invalid logon attempts; accept the prompted defaults of <em>Account lockout duration</em> = 15 minutes and
+   <em>Reset account lockout counter after</em> = 15 minutes (adjust to your standard). On Server 2022 you may also
+   see <em>Allow Administrator account lockout</em> — enable it to cover the built-in Administrator over the network.</p>
+<h4>Fix — PowerShell path</h4><pre><code>Backup-GPO -Name &#x27;Default Domain Policy&#x27; -Path C:\GPOBackups</code></pre><p class="cmdnote">Takes a restorable backup of the GPO (AD object + SYSVOL folder) before any change.</p><pre><code>net accounts /lockoutthreshold:10 /lockoutduration:15 /lockoutwindow:15</code></pre><p class="cmdnote">Run on DC01: writes the lockout values into the domain account policy, which lives in the Default Domain Policy. There is no Set-GP* cmdlet for security-settings INF values; net accounts (or editing the GPO in GPMC) is the supported path.</p><pre><code>gpupdate /force</code></pre><p class="cmdnote">Forces immediate policy reprocessing on the machine you run it on; other members pick it up within the 90–120 min refresh cycle.</p>
+<h4>Pre-change safety</h4><p><code>Backup-GPO -Name 'Default Domain Policy' -Path C:\GPOBackups</code> first (command above). Log the
+   change with the before-values: threshold 0 / duration n-a / window n-a. Warn the helpdesk: a too-aggressive
+   threshold can create a self-inflicted denial of service if a device with a cached stale password hammers a DC.</p>
+<h4>Verification</h4><p><code>net accounts</code> on DC01 should report <em>Lockout threshold: 10</em>. Re-run
+   <code>Invoke-GPOAudit.ps1</code> and confirm the Default Domain Policy ComputerDSVersion incremented in
+   <code>DomainGPOs\DomainGPOInventory.csv</code>. Watch Security event 4740 (account locked out) to confirm the
+   control fires during a deliberate test with a scratch account.</p>
+<h4>Rollback</h4><p><code>Restore-GPO -Name 'Default Domain Policy' -Path C:\GPOBackups</code> — restores both the AD
+   version and the SYSVOL content, or simply run <code>net accounts /lockoutthreshold:0</code> to revert the single value.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst finding A1 — derived from per-GPO settings XML; not present in Findings.csv (the tool audits GPO plumbing, not setting values).</p>
+</div></details></section><section class="tier tier-P2"><h3>P2 — Medium (fix this month)</h3>
+<details class="action" id="action-2" open>
+<summary><span class="anum">Action 2</span> <span class="badge" style="background:#F1C40F;color:#1a1a1a">Medium</span> <span class="chip">Security</span>
+<span class="atitle">Raise the password policy from 2022 factory defaults (minimum length 7)</span><span class="aobj">Default Domain Policy — Password Policy</span></summary>
+<div class="abody">
+<h4>What was found</h4><p>The Default Domain Policy carries the untouched installation defaults (evidence:
+   <code>DomainGPOs\Default Domain Policy_31b2f340.xml</code>): <code>MinimumPasswordLength = 7</code>,
+   <code>MaximumPasswordAge = 42</code>, <code>PasswordHistorySize = 24</code>, <code>PasswordComplexity = true</code>,
+   <code>ClearTextPassword = false</code> (reversible encryption correctly off).</p>
+<h4>Why it matters</h4><p>Seven characters is below every current guideline: the Microsoft security baseline sets 14, CIS
+   Benchmarks set 14, and NIST SP&nbsp;800-63B sets 8 as an absolute floor with length preferred over forced
+   rotation. A 7-character minimum makes offline cracking of captured NTLM hashes (and Kerberoasted service-account
+   tickets) trivial on commodity GPUs. The 42-day forced rotation is also a legacy pattern — modern guidance pairs
+   longer minimums with rotation only on evidence of compromise.</p>
+<h4>Fix — GUI path</h4><p>GPMC → Group Policy Objects → <strong>Default Domain Policy</strong> → Edit → Computer Configuration →
+   Policies → Windows Settings → Security Settings → Account Policies → <strong>Password Policy</strong>.
+   Set <em>Minimum password length</em> = 14. Decide your rotation stance deliberately: either keep 42 days or move
+   toward long-lived passphrases per NIST — document whichever you choose. Leave complexity enabled and
+   history at 24.</p>
+<h4>Fix — PowerShell path</h4><pre><code>Backup-GPO -Name &#x27;Default Domain Policy&#x27; -Path C:\GPOBackups</code></pre><p class="cmdnote">Restorable pre-change backup (skip if already taken in Action 1 the same day).</p><pre><code>net accounts /minpwlen:14</code></pre><p class="cmdnote">On DC01: raises the domain minimum password length inside the Default Domain Policy.</p><pre><code>Get-ADDefaultDomainPasswordPolicy</code></pre><p class="cmdnote">Reads the effective domain password policy straight from the domain head object — your verification source of truth.</p>
+<h4>Pre-change safety</h4><p>Backup as above. Communicate before enforcing: existing passwords are NOT invalidated by the change; users
+   are only held to 14 characters at their next change, so plan a phased notice. Check for service accounts with
+   short passwords that scripts might reset.</p>
+<h4>Verification</h4><p><code>Get-ADDefaultDomainPasswordPolicy</code> shows MinPasswordLength 14. Re-run the audit; the
+   inventory row for Default Domain Policy should show a bumped Computer version.</p>
+<h4>Rollback</h4><p><code>Restore-GPO -Name 'Default Domain Policy' -Path C:\GPOBackups</code> or
+   <code>net accounts /minpwlen:7</code>.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst finding A2 — derived from per-GPO settings XML.</p>
+</div></details>
+<details class="action" id="action-3" open>
+<summary><span class="anum">Action 3</span> <span class="badge" style="background:#F1C40F;color:#1a1a1a">Medium</span> <span class="chip">Connectivity</span>
+<span class="atitle">Investigate public IP addresses returned for the AD domain apex name</span><span class="aobj">andrews.bz DNS zone (domain apex)</span></summary>
+<div class="abody">
+<h4>What was found</h4><p>Both connectivity captures show the domain name resolving to four addresses:
+   <code>Summary\ConnectivityTests.csv</code> → “DNS resolution, andrews.bz: Resolved 192.168.111.5,
+   192.168.111.6, <strong>199.181.197.11, 199.181.197.12</strong>.” The 192.168.111.x pair are the DC-registered
+   apex A records; the 199.181.197.x pair are public Internet addresses that should not normally exist inside an
+   AD-integrated zone.</p>
+<h4>Why it matters</h4><p>Domain members use the apex name for DFS paths like <code>\\andrews.bz\SYSVOL</code>. If a client
+   round-robins onto a public address, SYSVOL/NETLOGON access and Group Policy processing can fail intermittently
+   (classic events 1058/1030) even though everything looks healthy most of the time. It can also leak internal SMB/LDAP
+   connection attempts to an external host. Common causes: someone manually added the public web-site IPs to the
+   internal zone so <code>http://andrews.bz</code> works inside the LAN, or clients are resolving via an external
+   resolver. Note the current event logs show zero 1058/1030 errors, so this is preventive — but it is a latent
+   reliability trap.</p>
+<h4>Fix — GUI path</h4><p>DNS Manager on DC01 → Forward Lookup Zones → andrews.bz → sort by Name and inspect the “(same as parent
+   folder)” A records. Expected: one per DC (192.168.111.5/.6, assuming both are DCs). If 199.181.197.11/.12 appear
+   here, they were added manually — remove them and publish the website internally via a dedicated host record
+   (e.g., <code>www.andrews.bz</code>) instead. Also verify member NIC DNS settings point only at internal DCs.</p>
+<h4>Fix — PowerShell path</h4><pre><code>Get-DnsServerResourceRecord -ZoneName &#x27;andrews.bz&#x27; -ComputerName DC01 -RRType A | Where-Object HostName -eq &#x27;@&#x27; | Format-Table HostName,RecordData</code></pre><p class="cmdnote">Lists every apex A record in the AD zone so you can see exactly where the public IPs come from.</p><pre><code>Resolve-DnsName andrews.bz -Server 192.168.111.5</code></pre><p class="cmdnote">Queries the DC&#x27;s DNS service directly, removing client-side resolver ambiguity.</p><pre><code>Remove-DnsServerResourceRecord -ZoneName &#x27;andrews.bz&#x27; -ComputerName DC01 -RRType A -Name &#x27;@&#x27; -RecordData &#x27;199.181.197.11&#x27;</code></pre><p class="cmdnote">Removes one stray apex record (repeat for .12) — run ONLY after confirming they are manual additions and nothing internal depends on them.</p>
+<h4>Pre-change safety</h4><p>Export the zone first: <code>Export-DnsServerZone -Name andrews.bz -FileName andrews.bz.bak</code>
+   (writes to %windir%\system32\dns). Confirm no internal service intentionally depends on the apex resolving to
+   the public web host.</p>
+<h4>Verification</h4><p><code>Resolve-DnsName andrews.bz</code> from a member returns only DC addresses. Re-run the audit —
+   ConnectivityTests should list only 192.168.111.x. Monitor GP operational log for absence of 1058/1030.</p>
+<h4>Rollback</h4><p>Re-add the records with <code>Add-DnsServerResourceRecordA -ZoneName andrews.bz -Name '@'
+   -IPv4Address 199.181.197.11</code> (and .12), or restore from the zone export.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst finding A3 — correlated from ConnectivityTests.csv in both runs.</p>
+</div></details></section><section class="tier tier-P3"><h3>P3 — Low (housekeeping backlog)</h3>
+<details class="action" id="action-4" open>
+<summary><span class="anum">Action 4</span> <span class="badge" style="background:#3498DB;color:#fff">Low</span> <span class="chip">Security</span>
+<span class="atitle">Inspect the four “GpoCustom” ACL entries and confirm they match factory defaults</span><span class="aobj">Default Domain Policy; Default Domain Controllers Policy</span></summary>
+<div class="abody">
+<h4>What was found</h4><p>The tool flagged 4 findings (2 GPOs × 2 trustees): <code>Permissions\GPOPermissions.csv</code> shows
+   <em>Domain Admins</em> and <em>Enterprise Admins</em> with Permission=<code>GpoCustom</code> on both default
+   GPOs, Inherited=False, Denied=False. <code>GpoCustom</code> only means the ACE set does not collapse into one of
+   the five named permission levels that <code>Get-GPPermission</code> can express.</p>
+<h4>Why it matters</h4><p>On the two default GPOs this exact pattern IS the out-of-box state: Domain/Enterprise Admins receive
+   Edit-Delete-Modify-Security <em>without</em> the Apply right (so admin workstations aren't force-fed the GPO),
+   which the cmdlet renders as Custom. The risk being screened for is that Custom can also hide a Deny ACE or an
+   Apply-without-Read combination that silently breaks processing — so it warrants one manual look, then a
+   documented pass. All remaining ACEs are textbook: SYSTEM = full edit, Authenticated Users = Read+Apply,
+   Enterprise Domain Controllers = Read (the MS16-072 read requirement is satisfied — no read gaps exist).</p>
+<h4>Fix — GUI path</h4><p>GPMC → Group Policy Objects → Default Domain Policy → <strong>Delegation</strong> tab →
+   <strong>Advanced…</strong> → select Domain Admins → confirm Allow on Read/Write/Create/Delete child objects and
+   <em>no Deny entries anywhere in the list</em>; Advanced → Effective Access can prove it. Repeat for Enterprise
+   Admins, then for Default Domain Controllers Policy. If it matches defaults, record “verified default ACL” in the
+   GPO description (Action&nbsp;8).</p>
+<h4>Fix — PowerShell path</h4><pre><code>Get-GPPermission -Name &#x27;Default Domain Policy&#x27; -All | Format-Table Trustee,Permission,Inherited</code></pre><p class="cmdnote">Re-lists the delegation exactly as the audit captured it.</p><pre><code>(Get-GPO -Name &#x27;Default Domain Policy&#x27;).GetSecurityInfo() | Format-List</code></pre><p class="cmdnote">Dumps the raw ACEs behind the &#x27;Custom&#x27; label so you can eyeball Deny bits and access masks without GPMC.</p>
+<h4>Pre-change safety</h4><p>Read-only verification — no backup required. If you DO find a Deny ACE or Apply-without-Read, stop, back
+   up with <code>Backup-GPO</code>, and treat the correction as a new change ticket.</p>
+<h4>Verification</h4><p>No Deny ACEs present; ACL matches the documented default. On the next audit run these four Low findings
+   remain (the tool cannot see your verification) — the GPO description note is the closure evidence.</p>
+<h4>Rollback</h4><p>Not applicable for verification. If ACEs were modified, <code>Restore-GPO</code> from the backup.</p>
+<p class="trace"><strong>Traceability:</strong> Merges 4 Findings.csv rows: “Custom ACL on … for Domain Admins / Enterprise Admins” (both GPOs, both runs = 8 raw rows).</p>
+</div></details>
+<details class="action" id="action-5" open>
+<summary><span class="anum">Action 5</span> <span class="badge" style="background:#3498DB;color:#fff">Low</span> <span class="chip">Hygiene</span>
+<span class="atitle">Perform and document a deliberate review of the two stale default GPOs</span><span class="aobj">Both default GPOs (unmodified 1,545 days)</span></summary>
+<div class="abody">
+<h4>What was found</h4><p><code>Summary\Findings.csv</code>: “Stale GPO … unmodified for 1545 days” for both GPOs; inventory
+   confirms ModificationTime 04/28/2022 for each, i.e., untouched since the domain was built.</p>
+<h4>Why it matters</h4><p>For default GPOs, “stale” is not automatically bad — you should never stuff them with unrelated settings.
+   The real signal is that <em>no</em> policy decision has been made in four years: the domain runs purely on
+   installation defaults (see Actions 1, 2, 10). The correct response is a recorded review, plus the account-policy
+   corrections above, not deletion or churn for its own sake.</p>
+<h4>Fix — GUI path</h4><p>Review each GPO's Settings tab in GPMC against Actions 1–2 and your intended baseline. Record the review
+   date and outcome in each GPO's description field (Action&nbsp;8) so the next audit shows both freshness and intent.</p>
+<h4>Fix — PowerShell path</h4><pre><code>Get-GPOReport -Name &#x27;Default Domain Policy&#x27; -ReportType Html -Path C:\GPOBackups\DDP-review.html</code></pre><p class="cmdnote">Generates the human-readable settings report you sign off against.</p><pre><code>Get-GPO -All | Select DisplayName,ModificationTime,@{n=&#x27;AgeDays&#x27;;e={(New-TimeSpan $_.ModificationTime).Days}}</code></pre><p class="cmdnote">Your ongoing staleness check — the same math the audit tool applied.</p>
+<h4>Pre-change safety</h4><p>Review only; no change, no backup needed until you edit (Actions 1–2 cover their own backups).</p>
+<h4>Verification</h4><p>Next audit run: ModificationTime moves once Actions 1–2 land, clearing the staleness math automatically.</p>
+<h4>Rollback</h4><p>Not applicable.</p>
+<p class="trace"><strong>Traceability:</strong> Merges 2 Findings.csv rows: “Stale GPO” × 2 GPOs (both runs = 4 raw rows).</p>
+</div></details>
+<details class="action" id="action-6" open>
+<summary><span class="anum">Action 6</span> <span class="badge" style="background:#3498DB;color:#fff">Low</span> <span class="chip">Processing</span>
+<span class="atitle">Review recurring warning 6314 (bandwidth estimation failed, assuming fast link)</span><span class="aobj">DC01 and W2022 — GP operational log</span></summary>
+<div class="abody">
+<h4>What was found</h4><p><code>EventLogs\GroupPolicyEvents.csv</code>: warning 6314 appears 161× on DC01 and 170× on W2022 —
+   every refresh cycle in the captured window. It is the only non-informational event in either log. All timing
+   events (8000/8001/8006/8007) complete in 0 seconds; there are no 7000-series processing errors and no 1058/1030
+   SYSVOL errors.</p>
+<h4>Why it matters</h4><p>6314 means the GP engine could not measure link speed (typical on virtual NICs and when NLA can't sample),
+   so it assumes a fast link — which on a wired/virtualized LAN is the correct outcome, and the “slow link
+   threshold: 500 kbps / connected over slow link: No” lines in <code>RSOP\gpresult-R.txt</code> confirm nothing is
+   being skipped. It is noise here, but on VPN laptops the same assumption can force software-install/folder-redirection
+   processing over slow links. Fix it only if you want clean logs or have remote clients.</p>
+<h4>Fix — GUI path</h4><p>Optional: GPMC → edit a GPO scoped to affected machines → Computer Configuration → Policies →
+   Administrative Templates → System → Group Policy → <strong>Configure Group Policy slow link detection</strong> →
+   Enabled, threshold 0 (0 = always treat as fast, disabling the estimator and the warning).</p>
+<h4>Fix — PowerShell path</h4><pre><code>Get-WinEvent -FilterHashtable @{LogName=&#x27;Microsoft-Windows-GroupPolicy/Operational&#x27;;Id=6314} -MaxEvents 5 | Format-List TimeCreated,Message</code></pre><p class="cmdnote">Confirms the warning content and cadence on any machine you&#x27;re checking.</p>
+<h4>Pre-change safety</h4><p>If setting the policy, back up the GPO you edit first (<code>Backup-GPO</code>).</p>
+<h4>Verification</h4><p>After a <code>gpupdate /force</code>, event 5314 reports the configured bandwidth behavior and 6314
+   stops appearing.</p>
+<h4>Rollback</h4><p>Set the policy back to Not Configured; restore GPO from backup if needed.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst finding A4 — derived from GroupPolicyEvents.csv (both runs).</p>
+</div></details>
+<details class="action" id="action-7" open>
+<summary><span class="anum">Action 7</span> <span class="badge" style="background:#3498DB;color:#fff">Low</span> <span class="chip">Processing</span>
+<span class="atitle">Close the data-collection gaps so the next audit is complete</span><span class="aobj">Audit tooling — DC01 and W2022 runs</span></summary>
+<div class="abody">
+<h4>What was found</h4><p><code>Summary\UnavailableData.csv</code> — DC01 run (3 rows): <em>gpresult-H</em> and <em>gpresult-X</em>
+   “did not produce an output file on the remote host,” which cascaded into <em>Applied/denied GPO analysis</em>
+   not collected. W2022 run (1 row): <em>Get-GPResultantSetOfPolicy (Html)</em> failed with “Object reference not
+   set to an instance of an object” after two retries (<code>Logs\GPOAudit.log</code>). Additionally, both runs hit
+   the 5,000-event collection cap — older events were exported to the .evtx but not analyzed.</p>
+<h4>Why it matters</h4><p>“Not collected” is not “healthy.” For DC01 we have NO applied/denied RSOP breakdown, so this report's
+   precedence conclusions for the DC rest on the link/inheritance data plus GPMC RSOP (<code>RSOP\RSOP-GPMC.*</code>),
+   which was collected. The W2022 HTML RSOP failure is cosmetic — GPResult.xml, gpresult /R and /Z all succeeded
+   there, so W2022 analysis is complete. The DC01 gpresult failure was the tool driving gpresult remotely
+   (<code>-ComputerName dc01</code>); the usual causes are the remote profile/scheduled-collection path, or output
+   redirection blocked on the remote side.</p>
+<h4>Fix — GUI path</h4><p>Run the next audit locally on DC01 (elevated PowerShell on the DC itself) rather than remotely, or verify
+   <code>gpresult /X C:\temp\out.xml /SCOPE COMPUTER</code> works interactively on DC01.</p>
+<h4>Fix — PowerShell path</h4><pre><code>.\Invoke-GPOAudit.ps1 -IncludeDomainInventory -IncludeEventLogs -IncludeSecurityAudit</code></pre><p class="cmdnote">Re-run ON DC01 locally so gpresult executes in-session — this fills the Applied/Denied datasets that were missing.</p><pre><code>winmgmt /verifyrepository</code></pre><p class="cmdnote">On W2022: checks the WMI repository the RSOP provider depends on; &#x27;consistent&#x27; means the HTML RSOP failure was transient and safe to ignore.</p>
+<h4>Pre-change safety</h4><p>Read-only re-run; no change control needed.</p>
+<h4>Verification</h4><p>Next DC01 run: <code>Summary\AppliedGPOs.csv</code> and <code>DeniedGPOs.csv</code> populated;
+   UnavailableData empty or reduced to the known-cosmetic RSOP-HTML row.</p>
+<h4>Rollback</h4><p>Not applicable.</p>
+<p class="trace"><strong>Traceability:</strong> Discloses all 4 UnavailableData rows plus the 5,000-event cap warnings from both GPOAudit.log files.</p>
+</div></details></section><section class="tier tier-P4"><h3>P4 — Optional / best practice</h3>
+<details class="action" id="action-8" open>
+<summary><span class="anum">Action 8</span> <span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <span class="chip">Hygiene</span>
+<span class="atitle">Add owner/purpose descriptions and adopt a naming convention</span><span class="aobj">Both GPOs</span></summary>
+<div class="abody">
+<h4>What was found</h4><p><code>Summary\Findings.csv</code>: “No description on GPO” for both GPOs (Informational × 2). The
+   inventory Description column is empty for both.</p>
+<h4>Why it matters</h4><p>Descriptions are the cheapest change-control artifact you have: owner, purpose, last review, ticket
+   reference. They make every future audit and every 2 a.m. troubleshooting session faster, and they are where the
+   Action 4/5 verification notes live.</p>
+<h4>Fix — GUI path</h4><p>GPMC → select GPO → Details tab → Comment field (this is the description AD stores).</p>
+<h4>Fix — PowerShell path</h4><pre><code>(Get-GPO -Name &#x27;Default Domain Policy&#x27;).Description = &#x27;Domain account/password/Kerberos policy ONLY. Owner: D. Andrews. Reviewed 2026-07; lockout+minpwlen updated per remediation plan.&#x27;</code></pre><p class="cmdnote">Sets the description directly on the GPO object — one line, instantly visible in GPMC and the next audit.</p><pre><code>(Get-GPO -Name &#x27;Default Domain Controllers Policy&#x27;).Description = &#x27;Default DC user-rights/audit baseline. Owner: D. Andrews. Reviewed 2026-07; ACL verified default.&#x27;</code></pre><p class="cmdnote">Same for the DC policy.</p>
+<h4>Pre-change safety</h4><p>Description-only change; harmless, but note it bumps ModificationTime (which also clears the staleness finding).</p>
+<h4>Verification</h4><p>Next audit: both “No description” findings disappear from Findings.csv.</p>
+<h4>Rollback</h4><p>Set the property back to an empty string.</p>
+<p class="trace"><strong>Traceability:</strong> Merges 2 Findings.csv rows: “No description on GPO” × 2 GPOs (both runs = 4 raw rows).</p>
+</div></details>
+<details class="action" id="action-9" open>
+<summary><span class="anum">Action 9</span> <span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <span class="chip">Hygiene</span>
+<span class="atitle">Create the ADMX Central Store</span><span class="aobj">SYSVOL — PolicyDefinitions</span></summary>
+<div class="abody">
+<h4>What was found</h4><p>No central store could be confirmed from the collected data (both per-GPO reports contain only Security
+   extension settings — no Administrative Templates in use anywhere, so nothing referenced ADMX files).
+   Baseline status: <strong>Unknown → almost certainly absent</strong> in a defaults-only domain.</p>
+<h4>Why it matters</h4><p>Without a central store, each admin workstation renders Administrative Templates from its own local ADMX
+   set, so two admins can see different policy trees and settings can appear “missing.” You will need it the moment
+   Action 10 introduces baseline GPOs.</p>
+<h4>Fix — GUI path</h4><p>File Explorer on DC01: copy <code>C:\Windows\PolicyDefinitions</code> to
+   <code>\\andrews.bz\SYSVOL\andrews.bz\Policies\PolicyDefinitions</code> (including the language subfolder).
+   Refresh with the newest ADMX pack for your OS/Office versions.</p>
+<h4>Fix — PowerShell path</h4><pre><code>Copy-Item C:\Windows\PolicyDefinitions \\andrews.bz\SYSVOL\andrews.bz\Policies\ -Recurse</code></pre><p class="cmdnote">Seeds the central store from the DC&#x27;s local definitions; GPMC automatically prefers the SYSVOL copy once present.</p>
+<h4>Pre-change safety</h4><p>SYSVOL replicates to all DCs — do this once, on one DC, during a quiet window. No GPO backup needed
+   (no GPO is modified).</p>
+<h4>Verification</h4><p>GPMC → any GPO → Administrative Templates node shows “Policy definitions (ADMX files) retrieved from the
+   central store.”</p>
+<h4>Rollback</h4><p>Delete the PolicyDefinitions folder from SYSVOL; editors fall back to local files.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst best-practice item B1 — inferred from per-GPO reports (Extensions column = Security only).</p>
+</div></details>
+<details class="action" id="action-10" open>
+<summary><span class="anum">Action 10</span> <span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <span class="chip">Security</span>
+<span class="atitle">Deploy security baseline GPOs and Windows LAPS (the domain runs on defaults alone)</span><span class="aobj">Domain-wide</span></summary>
+<div class="abody">
+<h4>What was found</h4><p><code>DomainGPOs\DomainGPOInventory.csv</code>: exactly 2 GPOs exist — the two defaults — with no
+   preferences, scripts, drive maps, printers, or software-install extensions anywhere, and zero WMI filters
+   (<code>WMI-Filters\WMIFilters.csv</code>: no records). Every hardening decision in this domain is currently
+   “whatever shipped in the box.”</p>
+<h4>Why it matters</h4><p>Defaults leave large gaps a baseline closes: SMB signing/encryption posture, NTLM restrictions, LSA
+   protection, advanced audit policy, PowerShell logging, and local-admin password randomization. Windows LAPS is
+   built into Server 2022 (April 2023 update onward) and eliminates the shared-local-admin-password lateral-movement
+   path — it is also the modern replacement for the GPP-cpassword pattern this tool hunts for (none found here,
+   per the “No cpassword values found” log line — that check PASSED).</p>
+<h4>Fix — GUI path</h4><p>Download the Microsoft Security Compliance Toolkit; import the Server 2022 Member Server and DC baselines
+   as NEW, separate GPOs (never merge into the defaults); link Member Server baseline to a staged OU first, DC
+   baseline to the Domain Controllers OU after testing. For LAPS: extend the schema, then create a “LAPS – Servers”
+   GPO under Computer Configuration → Policies → Administrative Templates → System → LAPS.</p>
+<h4>Fix — PowerShell path</h4><pre><code>Import-GPO -BackupGpoName &#x27;MSFT Windows Server 2022 - Member Server&#x27; -Path C:\Baselines -TargetName &#x27;SEC-Baseline-MemberServer&#x27; -CreateIfNeeded</code></pre><p class="cmdnote">Imports the toolkit baseline into a fresh GPO so the defaults stay untouched and rollback is a link removal.</p><pre><code>Update-LapsADSchema; Set-LapsADComputerSelfPermission -Identity &#x27;OU=Servers,DC=andrews,DC=bz&#x27;</code></pre><p class="cmdnote">One-time Windows LAPS schema extension, then grants machines in the OU the right to write their own rotated password.</p><pre><code>New-GPLink -Name &#x27;SEC-Baseline-MemberServer&#x27; -Target &#x27;OU=Servers,DC=andrews,DC=bz&#x27; -LinkEnabled Yes</code></pre><p class="cmdnote">Links the baseline where it applies; precedence over the domain-linked defaults is automatic at the OU level (LSDOU).</p>
+<h4>Pre-change safety</h4><p>Back up ALL GPOs first (Action 11 script). Stage on a pilot OU with one server for at least one refresh
+   cycle before broad linking. Baselines can break legacy protocols — test SMB/NTLM-dependent apps.</p>
+<h4>Verification</h4><p><code>gpresult /r</code> on a pilot machine lists the baseline GPO under Applied; re-run the audit and
+   confirm the new GPOs appear linked, versioned, and with clean permissions.</p>
+<h4>Rollback</h4><p><code>Remove-GPLink -Name 'SEC-Baseline-MemberServer' -Target 'OU=Servers,DC=andrews,DC=bz'</code> —
+   unlinking reverts scope instantly without deleting the GPO.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst best-practice item B2. Related PASS: SYSVOL cpassword scan clean; AD↔SYSVOL folder counts match (2=2); no version mismatches.</p>
+</div></details>
+<details class="action" id="action-11" open>
+<summary><span class="anum">Action 11</span> <span class="badge" style="background:#7F8C8D;color:#fff">Optional</span> <span class="chip">Change</span>
+<span class="atitle">Automate GPO backups and monitor the events that matter</span><span class="aobj">Domain-wide operations</span></summary>
+<div class="abody">
+<h4>What was found</h4><p>No evidence of any GPO backup regime exists in the collected data (baseline status: Unknown). Change
+   detection currently depends entirely on someone noticing.</p>
+<h4>Why it matters</h4><p>GPO deletion or a bad edit propagates domain-wide within two refresh cycles. A nightly
+   <code>Backup-GPO -All</code> plus alerting on the handful of failure events turns a potential rebuild into a
+   five-minute restore.</p>
+<h4>Fix — GUI path</h4><p>Task Scheduler on DC01 → create a daily task running the script below as a gMSA/service account with GPO
+   read rights and write access to the backup share.</p>
+<h4>Fix — PowerShell path</h4><pre><code>$p=&quot;D:\GPOBackups\$(Get-Date -f yyyyMMdd)&quot;; New-Item $p -ItemType Directory -Force | Out-Null; Backup-GPO -All -Path $p; Get-ChildItem D:\GPOBackups | Sort Name -Desc | Select -Skip 30 | Remove-Item -Recurse -Force</code></pre><p class="cmdnote">Nightly: date-stamped full backup of every GPO with 30-day retention pruning.</p><pre><code>Get-WinEvent -FilterHashtable @{LogName=&#x27;Microsoft-Windows-GroupPolicy/Operational&#x27;;Id=7000,7001,7002,7016,7017,1058,1030,1054,1055} -MaxEvents 20</code></pre><p class="cmdnote">The monitoring shortlist: 7000-series = processing failures, 1058/1030 = SYSVOL access, 1054/1055 = DC discovery. Wire these into your RMM alerting.</p>
+<h4>Pre-change safety</h4><p>None — read-only backups.</p>
+<h4>Verification</h4><p>Backup folder populates nightly; test <code>Restore-GPO</code> quarterly against a scratch GPO. Adopt a
+   quarterly <code>Invoke-GPOAudit.ps1</code> cadence and diff Findings.csv run-over-run.</p>
+<h4>Rollback</h4><p>Disable the scheduled task.</p>
+<p class="trace"><strong>Traceability:</strong> Analyst best-practice item B3.</p>
+</div></details></section>
+
+<h2><span class="sect-no">5</span>Root-cause correlation map</h2>
+<p>How the 10 unique tool findings (20 raw rows across two runs) and 8 analyst-derived items collapse into 11 actions:</p>
+<table><thead><tr><th>Raw finding / evidence</th><th>Merged into</th></tr></thead><tbody><tr><td>4× Low/Security “Custom ACL … Domain Admins / Enterprise Admins” (rows 1,2,4,5 in each run’s Findings.csv)</td><td>Action 4</td></tr><tr><td>2× Informational/Security “Authenticated Users has Read + Apply (default scope)” (rows 3,6)</td><td>No action — documented default; confirms MS16-072 compliance (scorecard Pass)</td></tr><tr><td>2× Informational/Hygiene “No description on GPO” (rows 7,9)</td><td>Action 8</td></tr><tr><td>2× Low/Hygiene “Stale GPO … 1545 days” (rows 8,10)</td><td>Action 5 (root-caused with Actions 1–2: the staleness IS the absence of policy decisions)</td></tr><tr><td>Analyst A1 — LockoutBadCount=0 (Default Domain Policy_31b2f340.xml)</td><td>Action 1</td></tr><tr><td>Analyst A2 — MinimumPasswordLength=7 (same XML)</td><td>Action 2</td></tr><tr><td>Analyst A3 — public IPs in apex DNS answer (ConnectivityTests.csv, both runs)</td><td>Action 3</td></tr><tr><td>Analyst A4 — warning 6314 ×331 (GroupPolicyEvents.csv, both runs)</td><td>Action 6</td></tr><tr><td>UnavailableData ×4 + 5,000-event caps (UnavailableData.csv, GPOAudit.log)</td><td>Action 7</td></tr><tr><td>Best-practice deltas B1–B3 (central store, baselines/LAPS, backups)</td><td>Actions 9, 10, 11</td></tr></tbody></table>
+<div class="callout">Correlation logic applied per methodology: connectivity passed everywhere, so no downstream
+finding was reclassified as a symptom; the four GpoCustom rows share one root cause (default admin ACL rendering)
+and became one verification action; the two staleness rows are root-caused with the missing account-policy
+decisions rather than treated as deletion candidates.</div>
+
+<h2><span class="sect-no">6</span>Data gaps &amp; confidence</h2>
+<p>“Not collected” ≠ “healthy.” Every gap below limits a specific conclusion in this report:</p>
+<table><thead><tr><th>Run</th><th>Area</th><th>Reason</th></tr></thead><tbody><tr><td>DC01</td><td>gpresult-H</td><td>gpresult did not produce an output file on the remote host.</td></tr><tr><td>DC01</td><td>gpresult-X</td><td>gpresult did not produce an output file on the remote host.</td></tr><tr><td>DC01</td><td>Applied/denied GPO analysis</td><td>GPResult.xml was not collected (gpresult /X failed or target offline).</td></tr><tr><td>W2022</td><td>Get-GPResultantSetOfPolicy (Html)</td><td>Object reference not set to an instance of an object.</td></tr><tr><td>Both</td><td>Event analysis depth</td><td>5,000-event analysis cap reached; full history preserved in EventLogs\GroupPolicy-Operational.evtx but not machine-analyzed.</td></tr></tbody></table>
+<p><strong>Impact assessment:</strong> DC01 has <span class="notcollected">NOT COLLECTED</span> status for its
+applied/denied RSOP breakdown — precedence conclusions for the DC rest on the link/inheritance inventory plus the
+successfully collected GPMC RSOP (<code>RSOP\RSOP-GPMC.html/.xml</code>) and gpresult /R /Z text output, which is a
+strong but not perfect substitute. W2022’s single failure (RSOP HTML render) is cosmetic: GPResult.xml and all text
+RSOP succeeded, and they confirm Default Domain Policy applied to the computer with no denials. To close the gaps:
+re-run locally on DC01 (Action 7), and rely on the exported .evtx when history beyond 5,000 events matters.</p>
+
+<h2><span class="sect-no">7</span>Best practices &amp; hardening guide</h2>
+<p>The P4 actions above (8–11) are the forward-looking program. Sequencing recommendation for a defaults-only
+domain: <strong>descriptions + central store first</strong> (zero risk, enables everything), then <strong>baseline
+GPOs staged on a pilot OU</strong>, then <strong>LAPS</strong>, with <strong>backup automation</strong> switched on
+before the first baseline link goes live. Adopt a quarterly <code>Invoke-GPOAudit.ps1</code> cadence — diff
+<code>Findings.csv</code> between runs as your drift detector — and alert on GP operational events 7000–7017,
+1058/1030, and 1054/1055 (Action 11 gives the exact filter). Keep the two default GPOs reserved for what they are:
+account policy (DDP) and DC user-rights/audit (DDCP); everything new goes in purpose-named GPOs
+(suggested convention: <code>SEC-|APP-|USR-&lt;Scope&gt;-&lt;Purpose&gt;</code>) so security intent is legible in GPMC
+at a glance.</p>
+
+<h2><span class="sect-no">8</span>Appendices</h2>
+<h3>A. Full findings table (both runs)</h3><table><thead><tr><th>Run</th><th>Severity</th><th>Category</th><th>Title</th><th>Detail</th><th>Recommendation</th><th>RelatedObject</th></tr></thead><tbody><tr><td>DC01</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Policy&#x27; for &#x27;Domain Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Policy</td></tr><tr><td>DC01</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Policy&#x27; for &#x27;Enterprise Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Policy</td></tr><tr><td>DC01</td><td>Informational</td><td>Security</td><td>&#x27;Default Domain Policy&#x27;: Authenticated Users has Read + Apply (default scope)</td><td>This is the DEFAULT and is not inherently insecure - it means the GPO applies to every user/computer in linked scopes. Listed for completeness.</td><td>Use security filtering only when the GPO must be narrower than its links.</td><td>Default Domain Policy</td></tr><tr><td>DC01</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Controllers Policy&#x27; for &#x27;Domain Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Controllers Policy</td></tr><tr><td>DC01</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Controllers Policy&#x27; for &#x27;Enterprise Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Controllers Policy</td></tr><tr><td>DC01</td><td>Informational</td><td>Security</td><td>&#x27;Default Domain Controllers Policy&#x27;: Authenticated Users has Read + Apply (default scope)</td><td>This is the DEFAULT and is not inherently insecure - it means the GPO applies to every user/computer in linked scopes. Listed for completeness.</td><td>Use security filtering only when the GPO must be narrower than its links.</td><td>Default Domain Controllers Policy</td></tr><tr><td>DC01</td><td>Informational</td><td>Hygiene</td><td>No description on GPO: &#x27;Default Domain Policy&#x27;</td><td>Undocumented GPOs slow down troubleshooting and change review.</td><td>Add owner/purpose/change-ticket to the GPO description.</td><td>Default Domain Policy</td></tr><tr><td>DC01</td><td>Low</td><td>Hygiene</td><td>Stale GPO: &#x27;Default Domain Policy&#x27; (unmodified for 1545 days)</td><td>Last modified 04/28/2022 15:50:14.</td><td>Review whether the GPO is still needed; stale GPOs often contain obsolete settings.</td><td>Default Domain Policy</td></tr><tr><td>DC01</td><td>Informational</td><td>Hygiene</td><td>No description on GPO: &#x27;Default Domain Controllers Policy&#x27;</td><td>Undocumented GPOs slow down troubleshooting and change review.</td><td>Add owner/purpose/change-ticket to the GPO description.</td><td>Default Domain Controllers Policy</td></tr><tr><td>DC01</td><td>Low</td><td>Hygiene</td><td>Stale GPO: &#x27;Default Domain Controllers Policy&#x27; (unmodified for 1545 days)</td><td>Last modified 04/28/2022 15:50:14.</td><td>Review whether the GPO is still needed; stale GPOs often contain obsolete settings.</td><td>Default Domain Controllers Policy</td></tr><tr><td>W2022</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Policy&#x27; for &#x27;Domain Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Policy</td></tr><tr><td>W2022</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Policy&#x27; for &#x27;Enterprise Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Policy</td></tr><tr><td>W2022</td><td>Informational</td><td>Security</td><td>&#x27;Default Domain Policy&#x27;: Authenticated Users has Read + Apply (default scope)</td><td>This is the DEFAULT and is not inherently insecure - it means the GPO applies to every user/computer in linked scopes. Listed for completeness.</td><td>Use security filtering only when the GPO must be narrower than its links.</td><td>Default Domain Policy</td></tr><tr><td>W2022</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Controllers Policy&#x27; for &#x27;Domain Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Controllers Policy</td></tr><tr><td>W2022</td><td>Low</td><td>Security</td><td>Custom ACL on &#x27;Default Domain Controllers Policy&#x27; for &#x27;Enterprise Admins&#x27;</td><td>Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.</td><td>Inspect the raw ACL in GPMC (Delegation &gt; Advanced) for deny entries or missing Read paired with Apply.</td><td>Default Domain Controllers Policy</td></tr><tr><td>W2022</td><td>Informational</td><td>Security</td><td>&#x27;Default Domain Controllers Policy&#x27;: Authenticated Users has Read + Apply (default scope)</td><td>This is the DEFAULT and is not inherently insecure - it means the GPO applies to every user/computer in linked scopes. Listed for completeness.</td><td>Use security filtering only when the GPO must be narrower than its links.</td><td>Default Domain Controllers Policy</td></tr><tr><td>W2022</td><td>Informational</td><td>Hygiene</td><td>No description on GPO: &#x27;Default Domain Policy&#x27;</td><td>Undocumented GPOs slow down troubleshooting and change review.</td><td>Add owner/purpose/change-ticket to the GPO description.</td><td>Default Domain Policy</td></tr><tr><td>W2022</td><td>Low</td><td>Hygiene</td><td>Stale GPO: &#x27;Default Domain Policy&#x27; (unmodified for 1545 days)</td><td>Last modified 04/28/2022 15:50:14.</td><td>Review whether the GPO is still needed; stale GPOs often contain obsolete settings.</td><td>Default Domain Policy</td></tr><tr><td>W2022</td><td>Informational</td><td>Hygiene</td><td>No description on GPO: &#x27;Default Domain Controllers Policy&#x27;</td><td>Undocumented GPOs slow down troubleshooting and change review.</td><td>Add owner/purpose/change-ticket to the GPO description.</td><td>Default Domain Controllers Policy</td></tr><tr><td>W2022</td><td>Low</td><td>Hygiene</td><td>Stale GPO: &#x27;Default Domain Controllers Policy&#x27; (unmodified for 1545 days)</td><td>Last modified 04/28/2022 15:50:14.</td><td>Review whether the GPO is still needed; stale GPOs often contain obsolete settings.</td><td>Default Domain Controllers Policy</td></tr></tbody></table>
+<h3>B. Applied / denied GPOs — W2022 (Computer scope)</h3><table><thead><tr><th>Scope</th><th>GpoName</th><th>LinkLocation</th><th>SOMOrder</th><th>LinkOrder</th><th>AppliedOrder</th><th>Enforced</th><th>Applied</th><th>DenialReason</th></tr></thead><tbody><tr><td>Computer</td><td>Default Domain Policy</td><td>andrews.bz</td><td>1</td><td>2</td><td>2</td><td>False</td><td>True</td><td></td></tr><tr><td>Computer</td><td>Local Group Policy</td><td>Local</td><td>1</td><td>1</td><td>1</td><td>False</td><td>True</td><td></td></tr></tbody></table>
+<p class="muted">User scope on W2022: no domain GPOs applied — expected, since the Default Domain Policy user side
+has never contained settings (User DS/SYSVOL version 0). Denied lists: no records on any scope.
+DC01 applied/denied: <span class="notcollected">NOT COLLECTED</span> — see Data gaps (gpresult /X failed remotely);
+capture by re-running the audit locally on DC01.</p>
+<h3>C. Link inventory</h3><table><thead><tr><th>GpoName</th><th>Target</th><th>TargetType</th><th>LinkOrder</th><th>Enabled</th><th>Enforced</th><th>BlockInheritance</th></tr></thead><tbody><tr><td>Default Domain Policy</td><td>DC=andrews,DC=bz</td><td>Domain</td><td>1</td><td>True</td><td>False</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>OU=Domain Controllers,DC=andrews,DC=bz</td><td>OU</td><td>1</td><td>True</td><td>False</td><td>False</td></tr></tbody></table>
+<h3>D. Effective inheritance (GPMC view)</h3><table><thead><tr><th>Container</th><th>ContainerType</th><th>GpoName</th><th>EffectiveOrder</th><th>Enabled</th><th>Enforced</th><th>LinkedDirectly</th><th>BlockInheritance</th></tr></thead><tbody><tr><td>DC=andrews,DC=bz</td><td>Domain</td><td>Default Domain Policy</td><td>1</td><td>True</td><td>False</td><td>True</td><td>False</td></tr><tr><td>OU=Domain Controllers,DC=andrews,DC=bz</td><td>OU</td><td>Default Domain Controllers Policy</td><td>1</td><td>True</td><td>False</td><td>True</td><td>False</td></tr><tr><td>OU=Domain Controllers,DC=andrews,DC=bz</td><td>OU</td><td>Default Domain Policy</td><td>1</td><td>True</td><td>False</td><td>False</td><td>False</td></tr></tbody></table>
+<p class="muted">Precedence readout: on the Domain Controllers OU the Default Domain Controllers Policy (linked
+directly) wins over the domain-linked Default Domain Policy for any conflicting setting — standard LSDOU with no
+enforced links and no blocked inheritance anywhere.</p>
+<h3>E. Permission inventory (all 10 ACEs)</h3><table><thead><tr><th>GpoName</th><th>Trustee</th><th>SidType</th><th>Permission</th><th>Inherited</th><th>Denied</th><th>Unresolved</th></tr></thead><tbody><tr><td>Default Domain Policy</td><td>Domain Admins</td><td>Group</td><td>GpoCustom</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Policy</td><td>Enterprise Admins</td><td>Group</td><td>GpoCustom</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Policy</td><td>SYSTEM</td><td>WellKnownGroup</td><td>GpoEditDeleteModifySecurity</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Policy</td><td>Authenticated Users</td><td>WellKnownGroup</td><td>GpoApply</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Policy</td><td>ENTERPRISE DOMAIN CONTROLLERS</td><td>WellKnownGroup</td><td>GpoRead</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>Domain Admins</td><td>Group</td><td>GpoCustom</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>Enterprise Admins</td><td>Group</td><td>GpoCustom</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>SYSTEM</td><td>WellKnownGroup</td><td>GpoEditDeleteModifySecurity</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>Authenticated Users</td><td>WellKnownGroup</td><td>GpoApply</td><td>False</td><td>False</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>ENTERPRISE DOMAIN CONTROLLERS</td><td>WellKnownGroup</td><td>GpoRead</td><td>False</td><td>False</td><td>False</td></tr></tbody></table>
+<h3>F. Connectivity tests (identical results both runs; DC01 shown)</h3><table><thead><tr><th>Test</th><th>Target</th><th>Success</th><th>Detail</th></tr></thead><tbody><tr><td>DC discovery</td><td>andrews.bz</td><td>True</td><td>Found DC01.andrews.bz (site: Default-First-Site-Name)</td></tr><tr><td>DC ping (ICMP)</td><td>DC01.andrews.bz</td><td>True</td><td>reachable</td></tr><tr><td>DNS resolution</td><td>andrews.bz</td><td>True</td><td>Resolved: 192.168.111.6, 192.168.111.5, 199.181.197.11, 199.181.197.12</td></tr><tr><td>LDAP TCP 389</td><td>DC01.andrews.bz</td><td>True</td><td>port open</td></tr><tr><td>LDAP bind (RootDSE)</td><td>DC01.andrews.bz</td><td>True</td><td>defaultNamingContext: DC=andrews,DC=bz</td></tr><tr><td>SMB SYSVOL</td><td>\\andrews.bz\SYSVOL</td><td>True</td><td>accessible</td></tr><tr><td>SMB NETLOGON</td><td>\\andrews.bz\NETLOGON</td><td>True</td><td>accessible</td></tr></tbody></table>
+<h3>G. Domain GPO inventory</h3><div style="overflow-x:auto"><table><thead><tr><th>DisplayName</th><th>Id</th><th>Owner</th><th>CreationTime</th><th>ModificationTime</th><th>UserDSVersion</th><th>UserSysvolVersion</th><th>ComputerDSVersion</th><th>ComputerSysvolVersion</th><th>GpoStatus</th><th>VersionMismatch</th></tr></thead><tbody><tr><td>Default Domain Policy</td><td>31b2f340-016d-11d2-945f-00c04fb984f9</td><td>ANDREWS\Domain Admins</td><td>4/28/2022 3:50:15 PM</td><td>4/28/2022 3:50:14 PM</td><td>0</td><td>0</td><td>1</td><td>1</td><td>AllSettingsEnabled</td><td>False</td></tr><tr><td>Default Domain Controllers Policy</td><td>6ac1786c-016f-11d2-945f-00c04fb984f9</td><td>ANDREWS\Domain Admins</td><td>4/28/2022 3:50:15 PM</td><td>4/28/2022 3:50:14 PM</td><td>0</td><td>0</td><td>1</td><td>1</td><td>AllSettingsEnabled</td><td>False</td></tr></tbody></table></div>
+<h3>H. Glossary</h3>
+<table><tbody><tr><td><strong>LSDOU</strong></td><td>Group Policy processing order — Local, Site, Domain, OU. Later wins on conflicts; link order breaks ties within a container (lower number = higher precedence).</td></tr><tr><td><strong>RSOP</strong></td><td>Resultant Set of Policy — the computed union of everything that actually applied to a specific computer/user, as captured by gpresult and the RSOP WMI provider.</td></tr><tr><td><strong>Enforced vs. Block Inheritance</strong></td><td>Block Inheritance stops higher-level links at an OU; an Enforced link punches through the block AND wins conflicts against lower-level GPOs. Neither is in use here.</td></tr><tr><td><strong>MS16-072</strong></td><td>2016 security change: computers read GPOs with the machine account, so every GPO must grant Read to Authenticated Users or Domain Computers or it silently stops applying. Verified satisfied in this domain.</td></tr><tr><td><strong>cpassword</strong></td><td>The AES-encrypted password field in legacy Group Policy Preferences XML. Microsoft published the static key (MS14-025), so any cpassword is a plaintext-equivalent credential. Scan result here: clean.</td></tr><tr><td><strong>GpoCustom</strong></td><td>Get-GPPermission’s label for any ACE set that doesn’t match its five canonical permission levels — includes the factory-default admin ACEs on default GPOs, but can also hide Deny entries; hence Action 4.</td></tr><tr><td><strong>DFSR</strong></td><td>DFS Replication — the service that replicates SYSVOL between DCs. Single-DC domains (like this one appears to be) have no replication partner, so AD↔SYSVOL version deltas are the main consistency check.</td></tr><tr><td><strong>Central Store</strong></td><td>A SYSVOL folder (Policies\PolicyDefinitions) holding one authoritative ADMX/ADML set so every GPMC console renders identical Administrative Templates.</td></tr><tr><td><strong>Windows LAPS</strong></td><td>Built-in local-admin password rotation storing per-machine secrets in AD with ACL-gated retrieval — the modern replacement for the GPP-password anti-pattern.</td></tr></tbody></table>
+
+<footer>GPO-Remediation-Plan_andrews.bz_20260721.html · self-contained (embedded CSS, no external assets; the
+collapse/expand and checkboxes are native HTML and work with JavaScript disabled) · every claim traceable to the
+Invoke-GPOAudit.ps1 output folders DC01_20260721_201119 and W2022_20260721_201416 · print-ready.</footer>
+</div></body></html>

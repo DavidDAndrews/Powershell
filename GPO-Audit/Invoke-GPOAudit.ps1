@@ -1,128 +1,195 @@
-#Requires -Version 5.1
-#==============================================================================
-#  Invoke-GPOAudit.ps1  -  Production Group Policy Object Audit Script
-#  Version  : 1.0.0
-#  Safe     : READ-ONLY except RSAT installation and local report files
-#  Platform : Windows 10, 11, Server 2019, 2022, 2025
-#==============================================================================
-
 <#
 .SYNOPSIS
-    Audits and documents every Group Policy Object that affects a target
-    Windows computer and, optionally, a specified user. Generates HTML,
-    CSV, JSON, and XML reports.
+    Audits and documents all Group Policy Objects (GPOs) that affect a specified
+    Windows computer and, optionally, a specified user.
 
 .DESCRIPTION
-    Produces a complete picture of the Group Policy environment including:
-      - Full RSOP for the specified computer and user via gpresult and
-        Get-GPResultantSetOfPolicy
-      - Domain-wide GPO inventory with version, status, and content analysis
-      - GPO link map: site, domain, and every OU
-      - Security filtering and delegation ACL analysis
-      - WMI filter inventory and consistency check
-      - SYSVOL <-> Active Directory consistency check
-      - Group Policy Operational event log analysis
-      - Categorised findings: Critical / High / Medium / Low / Informational
-      - Master HTML report (embedded CSS, no external dependencies), individual
-        per-GPO HTML and XML reports, CSV and JSON exports, plain-text log,
-        executive summary, and remediation recommendations
+    Invoke-GPOAudit.ps1 performs a comprehensive, READ-ONLY audit of Group Policy in an
+    Active Directory domain. The only changes it ever makes are:
 
-    READ-ONLY except for RSAT component installation (requires confirmation
-    or -InstallPrerequisites) and creating local report files.
+        1. Installing required RSAT components / Windows features (only with confirmation
+           or the -InstallPrerequisites switch, and honoring -WhatIf).
+        2. Creating local report files beneath -OutputPath.
+
+    It collects:
+        - Which GPOs exist in the domain (with -IncludeDomainInventory)
+        - Where every GPO is linked (site / domain / OU), link order, enforced,
+          enabled, and Block Inheritance status
+        - Which GPOs apply to the specified computer and user
+        - Which GPOs were denied and why (security filtering, WMI filtering,
+          disabled link, empty, inaccessible)
+        - Winning / resultant policy via gpresult (R, Z, H, X) and
+          Get-GPResultantSetOfPolicy
+        - Security filtering and delegation problems
+        - WMI filter inventory and problems
+        - SYSVOL vs. Active Directory consistency (orphans, missing folders,
+          version mismatches) - comparison only, nothing is touched
+        - Group Policy operational event log evidence (with -IncludeEventLogs)
+        - Categorized findings (Critical / High / Medium / Low / Informational)
+          with remediation recommendations
+
+    Output is a structured folder tree containing a master HTML report (embedded CSS,
+    fully portable, no internet access required), CSV and JSON exports of every major
+    dataset, per-GPO HTML and XML reports, EVTX/CSV event exports, and a full
+    execution log.
+
+    ================================ PERMISSIONS =================================
+    Required permissions, by feature:
+
+    WORKS AS A STANDARD DOMAIN USER
+        - Reading GPO objects, links, and inheritance (Get-GPO, Get-GPInheritance)
+          for all GPOs where "Authenticated Users" retains Read (the default)
+        - Reading WMI filters and OU structure via LDAP
+        - Reading \\domain\SYSVOL and \\domain\NETLOGON (default ACLs allow Read)
+        - gpresult for the CURRENT user on the LOCAL computer (user scope only)
+
+    REQUIRES LOCAL ADMINISTRATOR ON THE TARGET COMPUTER
+        - gpresult computer scope (/SCOPE COMPUTER) and RSOP for other users
+        - Reading the Microsoft-Windows-GroupPolicy/Operational event log remotely
+        - Get-GPResultantSetOfPolicy against the target computer
+        - Reading Group Policy state/history from the target's registry
+        - Installing RSAT capabilities / Windows features (local machine)
+        This script therefore REQUIRES elevation and will stop without it.
+
+    REQUIRES DOMAIN ADMIN (or equivalent delegation)
+        - Reading GPOs whose Read permission has been stripped from
+          Authenticated Users (locked-down GPOs)
+        - Full delegation/permission audit of every GPO (Get-GPPermission needs
+          Read on each GPO's security descriptor)
+        - Some domain controller diagnostics
+        Everything else works with ordinary read access; the script clearly marks
+        any item it could not read as UNAVAILABLE instead of failing.
+
+    ============================ POWERSHELL EDITIONS =============================
+    Windows PowerShell 5.1 is the PREFERRED host. The GroupPolicy and
+    ActiveDirectory RSAT modules are written for .NET Framework; under PowerShell 7
+    the GroupPolicy module is not natively supported and must be proxied through
+    the Windows PowerShell compatibility layer (Import-Module -UseWindowsPowerShell),
+    which serializes objects and can silently lose fidelity (e.g., some report
+    generation and permission objects). The script detects PowerShell 7, attempts
+    the compatibility import, verifies the cmdlets actually work, and otherwise
+    instructs the operator (or relaunches with -RelaunchInWindowsPowerShell) to use
+    powershell.exe 5.1.
 
 .PARAMETER ComputerName
-    Name of the computer to audit. Defaults to the local machine.
+    Target computer to audit. Defaults to the local computer. Remote targets are
+    audited over WinRM / CIM where possible; every remote method failure is
+    non-fatal and clearly reported.
 
 .PARAMETER UserName
-    Optional user to include in RSOP analysis. Accepts DOMAIN\User or UPN.
+    Optional user to include in the audit, as 'DOMAIN\User', 'user@domain', or a
+    plain SAM account name. User RSOP data requires that the user has logged on to
+    the target computer at least once.
 
 .PARAMETER OutputPath
-    Root folder for report files.
-    Defaults to C:\GPOAudit\<ComputerName>_yyyyMMdd_HHmmss.
+    Root folder for all reports. Defaults to
+    <SystemDrive>\GPOAudit\<COMPUTERNAME>_yyyyMMdd_HHmmss
 
 .PARAMETER Domain
-    AD domain FQDN. Defaults to $env:USERDNSDOMAIN.
+    DNS name of the domain to audit. Defaults to the computer's joined domain.
 
 .PARAMETER DomainController
-    Specific DC to target. Defaults to the PDC Emulator or logon DC.
+    Specific domain controller to query. Defaults to an automatically discovered DC.
 
 .PARAMETER Credential
-    PSCredential for privileged or remote operations. Never written to disk.
+    Alternate credential for Active Directory, CIM, and WinRM operations.
+    NOTE: the GroupPolicy module does not accept credentials; GP cmdlets always run
+    as the launching user. Credentials are never written to disk.
 
 .PARAMETER InstallPrerequisites
-    Install missing RSAT components without an interactive prompt.
+    Install missing RSAT capabilities (client) or Windows features (server)
+    without interactive confirmation. Honors -WhatIf.
 
 .PARAMETER IncludeDomainInventory
-    Enumerate every GPO, link, WMI filter, and (with -IncludeSecurityAudit)
-    every permission set in the domain.
+    Enumerate every GPO in the domain with full metadata, per-GPO HTML/XML
+    reports, and the complete link map for all sites, the domain, and all OUs.
 
 .PARAMETER IncludeEventLogs
-    Collect the Group Policy Operational event log from the target computer.
+    Collect Microsoft-Windows-GroupPolicy/Operational events (CSV and, where
+    possible, EVTX) and analyze them for errors, slow processing, and filtering.
 
 .PARAMETER IncludeSecurityAudit
-    Deep ACL and delegation analysis for every GPO.
-    Requires -IncludeDomainInventory.
+    Run the per-GPO security filtering / delegation audit (Get-GPPermission) and
+    the WMI filter audit even without -IncludeDomainInventory.
 
 .PARAMETER SkipRemoteRSOP
-    Skip RSOP collection on the remote computer.
+    Do not attempt RSOP/gpresult collection against a remote target (useful for
+    domain-only inventory runs or offline targets).
 
 .PARAMETER OpenReport
-    Open the master HTML report in the default browser when done.
+    Open the master HTML report when the audit completes.
 
-.PARAMETER StaleGPODays
-    Days without modification before a GPO is flagged as stale. Default: 365.
+.PARAMETER StaleGpoDays
+    A GPO not modified in this many days is flagged as stale. Default 365.
+
+.PARAMETER RecentGpoDays
+    A GPO modified within this many days is flagged as recently changed. Default 7.
+
+.PARAMETER EventLogDays
+    How many days of Group Policy operational events to collect. Default 14.
+
+.PARAMETER ForceGPUpdate
+    EXPLICIT opt-in to run 'gpupdate /force' on the target before collection.
+    Never runs without this switch. Honors -WhatIf.
+
+.PARAMETER RelaunchInWindowsPowerShell
+    If running under PowerShell 7 and the GroupPolicy compatibility import fails,
+    automatically relaunch this script in Windows PowerShell 5.1
+    (credentials cannot be forwarded and will be re-prompted).
 
 .EXAMPLE
     .\Invoke-GPOAudit.ps1 -InstallPrerequisites -IncludeDomainInventory -IncludeEventLogs
 
+    Full local computer audit including the domain-wide GPO inventory and event logs,
+    installing any missing RSAT prerequisites unattended.
+
 .EXAMPLE
-    .\Invoke-GPOAudit.ps1 `
-        -ComputerName PC123 `
-        -UserName 'DOMAIN\User1' `
-        -IncludeDomainInventory `
-        -IncludeEventLogs `
-        -OutputPath C:\Audits\PC123
+    .\Invoke-GPOAudit.ps1 -ComputerName PC123 -UserName 'DOMAIN\User1' -IncludeDomainInventory -IncludeEventLogs -OutputPath C:\Audits\PC123
+
+    Remote computer + user audit with domain inventory, written to C:\Audits\PC123.
 
 .EXAMPLE
     .\Invoke-GPOAudit.ps1 -IncludeDomainInventory -SkipRemoteRSOP
+
+    Domain-only inventory: enumerates and documents all GPOs, links, permissions,
+    WMI filters, and SYSVOL health without touching any target computer.
 
 .EXAMPLE
     $Credential = Get-Credential
     .\Invoke-GPOAudit.ps1 -ComputerName PC123 -Credential $Credential -IncludeDomainInventory
 
+    Remote audit using alternate credentials for AD/CIM/WinRM operations.
+
 .NOTES
-    PERMISSIONS REQUIRED
-    Local Administrator (script host)  : Always required (auto-elevates via UAC).
-    Standard Domain User               : Own-account gpresult, read GPO metadata.
-    Delegated GPO Reader               : Full inventory, ACL audit.
-    Domain Admin                       : All features, SYSVOL, full ACLs.
-    Local Admin on target              : Remote RSOP, remote event logs.
-    SYSVOL (Authenticated Users read)  : cpassword scan, GPT.INI comparison.
-
-    If not already elevated, the script re-launches itself with RunAs and
-    the same parameters (except -Credential, which cannot be forwarded).
-
-    PowerShell 5.1 is preferred. The GroupPolicy module is a Windows
-    PowerShell binary module. In PS 7 the script attempts the
-    -UseWindowsPowerShell compatibility shim and warns if that fails.
+    Author  : GPO Audit Toolkit
+    Requires: Windows 10/11 or Windows Server 2019/2022/2025, domain joined,
+              local administrator rights, RSAT GroupPolicy + ActiveDirectory tools
+              (installable via -InstallPrerequisites).
+    Safety  : READ-ONLY against Active Directory, SYSVOL, and all GPOs.
+              Never modifies GPOs, permissions, links, or SYSVOL content.
+              Never writes credentials to disk.
 #>
-
-[CmdletBinding(SupportsShouldProcess, ConfirmImpact = 'Medium')]
-param (
-    [Parameter()]
+#Requires -Version 5.1
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Parameter(Position = 0)]
     [ValidateNotNullOrEmpty()]
     [string]$ComputerName = $env:COMPUTERNAME,
 
     [Parameter()]
+    [ValidatePattern('^[^\\/\[\]:;|=,+*?<>"]+$|^[^\\]+\\[^\\]+$|^\S+@\S+$')]
     [string]$UserName,
 
     [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$OutputPath,
 
     [Parameter()]
-    [string]$Domain = $(if ($env:USERDNSDOMAIN) { $env:USERDNSDOMAIN } else { '' }),
+    [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9.-]*$')]
+    [string]$Domain,
 
     [Parameter()]
+    [ValidateNotNullOrEmpty()]
     [string]$DomainController,
 
     [Parameter()]
@@ -149,1828 +216,2663 @@ param (
     [switch]$OpenReport,
 
     [Parameter()]
-    [ValidateRange(1, 9999)]
-    [int]$StaleGPODays = 365
+    [ValidateRange(1, 3650)]
+    [int]$StaleGpoDays = 365,
+
+    [Parameter()]
+    [ValidateRange(1, 365)]
+    [int]$RecentGpoDays = 7,
+
+    [Parameter()]
+    [ValidateRange(1, 365)]
+    [int]$EventLogDays = 14,
+
+    [Parameter()]
+    [switch]$ForceGPUpdate,
+
+    [Parameter()]
+    [switch]$RelaunchInWindowsPowerShell
 )
 
-Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Continue'
+Set-StrictMode -Version 2.0
 
-#region ── Script-scope state ──────────────────────────────────────────────────
+# =============================================================================
+#  Script-scope state
+# =============================================================================
+$script:ScriptVersion   = '1.0.0'
+$script:StartTime       = Get-Date
+$script:LogFile         = $null
+$script:TranscriptOn    = $false
+$script:Findings        = New-Object System.Collections.Generic.List[object]
+$script:Unavailable     = New-Object System.Collections.Generic.List[object]
+$script:Datasets        = @{}
+$script:Paths           = @{}
+$script:GPModuleMode    = 'Unknown'      # Native | WinPSCompat | Unavailable
+$script:ADModuleMode    = 'Unknown'
+$script:HasCredential   = $false
+$script:IsLocalTarget   = $true
+$script:TargetOnline    = $false
+$script:WinRMAvailable  = $false
+$script:CimSession      = $null
+$script:AdParams        = @{}            # splat for AD cmdlets  (-Server/-Credential)
+$script:GpParams        = @{}            # splat for GP cmdlets  (-Domain/-Server)
+$script:DomainDN        = $null
+$script:ConfigNC        = $null
+$script:DomainInfo      = $null
+$script:RestartNeeded   = $false
+$script:AllGpos         = @()            # cache of Get-GPO -All results
+$script:GpoLinkIndex    = @{}            # GUID -> list of link records
+$script:MasterReport    = $null
 
-$script:StartTime         = Get-Date
-$script:Findings          = [System.Collections.Generic.List[pscustomobject]]::new()
-$script:LogLines          = [System.Collections.Generic.List[string]]::new()
-$script:GPModuleLoaded    = $false
-$script:ADModuleLoaded    = $false
-$script:IsRemote          = ($ComputerName -ne $env:COMPUTERNAME)
-$script:RootOutput        = ''
-$script:ReportPath        = ''
-$script:DC                = ''
-$script:SectionSeq        = 0
-$script:BoundParameters  = @{} + $PSBoundParameters
+# =============================================================================
+#  Core helpers: logging, sanitizing, exporting, findings
+# =============================================================================
 
-#endregion
-
-#region ── LOGGING AND HELPERS ─────────────────────────────────────────────────
-
-function Write-Log {
+function Write-AuditLog {
+    <#
+    .SYNOPSIS
+        Central logger: timestamped line to the log file plus the proper stream.
+    #>
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory, ValueFromPipeline)]
-        [string]$Message,
-        [ValidateSet('INFO','WARN','ERROR','SUCCESS','SECTION')]
-        [string]$Level = 'INFO'
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Message,
+        [ValidateSet('Info', 'Success', 'Warn', 'Error', 'Debug', 'Section')]
+        [string]$Level = 'Info'
     )
-    process {
-        $ts   = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-        $line = "[$ts][$Level] $Message"
-        $script:LogLines.Add($line)
-        switch ($Level) {
-            'SECTION' { Write-Host "`n=== $Message ===" -ForegroundColor Cyan }
-            'SUCCESS' { Write-Host "  [OK] $Message"   -ForegroundColor Green }
-            'WARN'    { Write-Warning $Message }
-            'ERROR'   { Write-Error   $Message -ErrorAction Continue }
-            default   { Write-Verbose $line }
-        }
+    $stamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $line  = '[{0}] [{1,-7}] {2}' -f $stamp, $Level.ToUpper(), $Message
+    if ($script:LogFile) {
+        try { Add-Content -Path $script:LogFile -Value $line -Encoding UTF8 -ErrorAction SilentlyContinue } catch { }
     }
-}
-
-function Add-Finding {
-    [CmdletBinding()]
-    param(
-        [ValidateSet('Critical','High','Medium','Low','Informational')]
-        [string]$Severity,
-        [string]$Category,
-        [string]$Title,
-        [string]$Detail         = '',
-        [string]$Recommendation = '',
-        [string]$AffectedObject = ''
-    )
-    $script:Findings.Add([pscustomobject]@{
-        Severity        = $Severity
-        Category        = $Category
-        Title           = $Title
-        Detail          = $Detail
-        Recommendation  = $Recommendation
-        AffectedObject  = $AffectedObject
-    })
-    $lv = if ($Severity -in 'Critical','High') { 'WARN' } else { 'INFO' }
-    Write-Log "Finding [$Severity][$Category] $Title" -Level $lv
+    switch ($Level) {
+        'Section' { Write-Host "`n=== $Message ===" -ForegroundColor Cyan }
+        'Success' { Write-Host "  [OK] $Message" -ForegroundColor Green }
+        'Warn'    { Write-Warning $Message }
+        'Error'   { Write-Host "  [FAIL] $Message" -ForegroundColor Red }
+        'Debug'   { Write-Verbose $Message }
+        default   { Write-Verbose $Message; Write-Host "  $Message" -ForegroundColor Gray }
+    }
 }
 
 function Get-SafeFileName {
-    param([Parameter(Mandatory)][string]$Name)
-    $invalid = [System.IO.Path]::GetInvalidFileNameChars()
-    $safe    = $Name
-    foreach ($c in $invalid) { $safe = $safe.Replace([string]$c, '_') }
-    $safe = $safe -replace '\s+', '_'
-    if ($safe.Length -gt 180) { $safe = $safe.Substring(0, 180) }
+    <#
+    .SYNOPSIS
+        Strips characters that are invalid in file names and caps the length so
+        GPO display names can safely become file names.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [int]$MaxLength = 140
+    )
+    $invalid = [System.IO.Path]::GetInvalidFileNameChars() -join ''
+    $pattern = '[{0}]' -f [regex]::Escape($invalid)
+    $safe = [regex]::Replace($Name, $pattern, '_')
+    $safe = $safe.Trim().TrimEnd('.')
+    if ([string]::IsNullOrWhiteSpace($safe)) { $safe = 'Unnamed' }
+    if ($safe.Length -gt $MaxLength) { $safe = $safe.Substring(0, $MaxLength) }
     return $safe
 }
 
-function ConvertTo-HtmlEncoded {
-    param([string]$Text)
-    if ([string]::IsNullOrEmpty($Text)) { return '' }
-    $Text -replace '&','&amp;' -replace '<','&lt;' -replace '>','&gt;' -replace '"','&quot;' -replace "'", '&#39;'
-}
-
-function New-HtmlTable {
-    param([object[]]$Data, [string[]]$Properties)
-    if ((Get-SafeCount $Data) -eq 0) { return '<p class="no-data">No data available.</p>' }
-    if (-not $Properties -or $Properties.Count -eq 0) {
-        $Properties = @($Data[0].PSObject.Properties | ForEach-Object { $_.Name })
-    }
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.Append('<table><thead><tr>')
-    foreach ($p in $Properties) { [void]$sb.Append("<th>$(ConvertTo-HtmlEncoded $p)</th>") }
-    [void]$sb.Append('</tr></thead><tbody>')
-    foreach ($row in $Data) {
-        [void]$sb.Append('<tr>')
-        foreach ($p in $Properties) {
-            $val = Get-ObjectProperty -InputObject $row -Name $p -Default ''
-            if ($null -eq $val) { $val = '' }
-            [void]$sb.Append("<td>$(ConvertTo-HtmlEncoded ($val.ToString()))</td>")
-        }
-        [void]$sb.Append('</tr>')
-    }
-    [void]$sb.Append('</tbody></table>')
-    return $sb.ToString()
-}
-
-function New-HtmlSection {
-    param([string]$Title, [string]$Content, [switch]$Collapsed)
-    $script:SectionSeq++
-    $id     = "sec$($script:SectionSeq)"
-    $toggle = if ($Collapsed) { '[+]' } else { '[-]' }
-    $style  = if ($Collapsed) { ' style="display:none"' } else { '' }
-    return @"
-<div class="section">
-  <div class="section-hdr" onclick="toggleSec('$id')">
-    <span class="sec-title">$(ConvertTo-HtmlEncoded $Title)</span>
-    <span id="toggle_$id" class="toggle-btn">$toggle</span>
-  </div>
-  <div class="section-body" id="body_$id"$style>
-    $Content
-  </div>
-</div>
-"@
-}
-
-#endregion
-
-#region ── OS / ENVIRONMENT DETECTION ─────────────────────────────────────────
-
-function Get-OSInfo {
-    $os = $null
-    try   { $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop }
-    catch { try { $os = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction Stop } catch {} }
-    $caption = if ($os) { $os.Caption } else { [System.Environment]::OSVersion.VersionString }
-    $build   = if ($os) { $os.BuildNumber } else { [System.Environment]::OSVersion.Version.Build.ToString() }
-    [pscustomobject]@{
-        Caption  = $caption
-        Build    = $build
-        IsClient = ($caption -match 'Windows 10|Windows 11')
-        IsServer = ($caption -match 'Windows Server')
-    }
-}
-
-function Test-IsAdmin {
-    $id = [System.Security.Principal.WindowsIdentity]::GetCurrent()
-    $p  = New-Object System.Security.Principal.WindowsPrincipal($id)
-    return $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
-}
-
-function Get-ObjectProperty {
+function Get-PropertySafe {
     <#
     .SYNOPSIS
-        StrictMode-safe property read. Returns $Default when missing or input is null.
+        StrictMode-safe property reader; returns $null when the property is absent.
     #>
+    [CmdletBinding()]
     param(
-        [AllowNull()]$InputObject,
+        [Parameter()][object]$InputObject,
         [Parameter(Mandatory)][string]$Name,
-        $Default = $null
+        [object]$Default = $null
     )
     if ($null -eq $InputObject) { return $Default }
     $prop = $InputObject.PSObject.Properties[$Name]
-    if ($null -eq $prop) { return $Default }
-    return $prop.Value
+    if ($null -ne $prop) { return $prop.Value }
+    return $Default
 }
 
-function Get-SafeCount {
-    param([AllowNull()]$InputObject)
-    return @($InputObject).Count
-}
-
-function Test-IsDeserializedTypeName {
-    # WinPS compatibility shim often replaces complex objects with their type name string.
-    param([AllowNull()]$Value, [string]$TypeName)
-    return ($Value -is [string] -and $Value -eq $TypeName)
-}
-
-function Get-GpoAdVersions {
+function Export-AuditDataset {
     <#
     .SYNOPSIS
-        User/Computer GPO versions from the GPO object, or GPT.INI when the PS7 shim omits them.
+        Registers a dataset and exports it to CSV + JSON for machine analysis.
     #>
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)]$Gpo,
-        [string]$DomainName
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter()][AllowNull()][object[]]$Data,
+        [Parameter(Mandatory)][string]$Folder
     )
-    $userVer = Get-ObjectProperty -InputObject $Gpo -Name 'UserVersion'
-    $compVer = Get-ObjectProperty -InputObject $Gpo -Name 'ComputerVersion'
-    if ($null -ne $userVer -and $null -ne $compVer) {
-        return @{ User = ([int]$userVer -band 0xFFFF); Computer = ([int]$compVer -band 0xFFFF) }
-    }
-
+    if ($null -eq $Data) { $Data = @() }
+    $script:Datasets[$Name] = $Data
     try {
-        $id = [string](Get-ObjectProperty -InputObject $Gpo -Name 'Id' -Default '')
-        $id = $id.Trim('{}')
-        if (-not $id -or -not $DomainName) { return @{ User = 0; Computer = 0 } }
-        $gptPath = "\\$DomainName\SYSVOL\$DomainName\Policies\{$id}\GPT.INI"
-        if (-not (Test-Path -LiteralPath $gptPath)) { return @{ User = 0; Computer = 0 } }
-        $vLine = Get-Content -LiteralPath $gptPath -ErrorAction Stop |
-            Where-Object { $_ -match '^\s*Version\s*=' } |
-            Select-Object -First 1
-        if (-not $vLine) { return @{ User = 0; Computer = 0 } }
-        $sysVer = [int](($vLine -replace '.*=\s*', '').Trim())
-        return @{ User = ($sysVer -shr 16); Computer = ($sysVer -band 0xFFFF) }
+        $csv  = Join-Path $Folder ("{0}.csv"  -f $Name)
+        $json = Join-Path $Folder ("{0}.json" -f $Name)
+        if ($Data.Count -gt 0) {
+            $Data | Export-Csv -Path $csv -NoTypeInformation -Encoding UTF8
+        }
+        else {
+            Set-Content -Path $csv -Value '# no records collected' -Encoding UTF8
+        }
+        $Data | ConvertTo-Json -Depth 6 | Set-Content -Path $json -Encoding UTF8
+        Write-AuditLog -Level Debug -Message "Exported dataset '$Name' ($($Data.Count) records)"
     }
     catch {
-        return @{ User = 0; Computer = 0 }
+        Write-AuditLog -Level Warn -Message "Failed to export dataset '$Name': $($_.Exception.Message)"
     }
 }
 
-function Invoke-WindowsPowerShellJson {
+function Add-AuditFinding {
     <#
     .SYNOPSIS
-        Runs a script in Windows PowerShell 5.1 and returns objects from JSON.
-        Used when the PS7 WinPS compatibility shim drops complex GroupPolicy types.
+        Records a categorized, severity-ranked finding for the reports.
     #>
+    [CmdletBinding()]
     param(
-        [Parameter(Mandatory)][string]$Script,
-        [int]$Depth = 6
+        [Parameter(Mandatory)]
+        [ValidateSet('Critical', 'High', 'Medium', 'Low', 'Informational')]
+        [string]$Severity,
+        [Parameter(Mandatory)][string]$Category,
+        [Parameter(Mandatory)][string]$Title,
+        [Parameter()][string]$Detail = '',
+        [Parameter()][string]$Recommendation = '',
+        [Parameter()][string]$RelatedObject = ''
     )
-    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-    if (-not (Test-Path -LiteralPath $exe)) {
-        throw 'Windows PowerShell 5.1 not found (powershell.exe).'
-    }
+    $script:Findings.Add([pscustomobject]@{
+            Severity       = $Severity
+            Category       = $Category
+            Title          = $Title
+            Detail         = $Detail
+            Recommendation = $Recommendation
+            RelatedObject  = $RelatedObject
+            Timestamp      = (Get-Date -Format 's')
+        })
+    $lvl = 'Info'
+    if ($Severity -in @('Critical', 'High')) { $lvl = 'Warn' }
+    Write-AuditLog -Level $lvl -Message "FINDING [$Severity/$Category] $Title"
+}
 
-    $wrapped = @"
-`$ErrorActionPreference = 'Stop'
-Import-Module GroupPolicy -ErrorAction Stop
-try { Import-Module ActiveDirectory -ErrorAction SilentlyContinue } catch {}
-`$__result = . { $Script }
-if (`$null -eq `$__result) { return }
-`$__result | ConvertTo-Json -Depth $Depth -Compress
-"@
-    $tmpIn  = [System.IO.Path]::ChangeExtension([System.IO.Path]::GetTempFileName(), '.ps1')
-    $tmpOut = [System.IO.Path]::GetTempFileName()
-    $tmpErr = "$tmpOut.err"
+function Add-UnavailableItem {
+    <#
+    .SYNOPSIS
+        Marks data that could not be collected (permissions / offline target) so
+        the reports clearly distinguish "not collected" from "not present".
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Area,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    $script:Unavailable.Add([pscustomobject]@{ Area = $Area; Reason = $Reason })
+    Write-AuditLog -Level Warn -Message "UNAVAILABLE: $Area - $Reason"
+}
+
+function Invoke-AuditStep {
+    <#
+    .SYNOPSIS
+        Runs one collection phase; guarantees a single failed phase can never
+        terminate the whole audit.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][scriptblock]$Action
+    )
+    Write-AuditLog -Level Section -Message $Name
     try {
-        Set-Content -LiteralPath $tmpIn -Value $wrapped -Encoding UTF8
-        $p = Start-Process -FilePath $exe `
-            -ArgumentList @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $tmpIn) `
-            -Wait -PassThru -WindowStyle Hidden `
-            -RedirectStandardOutput $tmpOut -RedirectStandardError $tmpErr
-        $json = Get-Content -LiteralPath $tmpOut -Raw -ErrorAction SilentlyContinue
-        if ($p.ExitCode -ne 0 -and [string]::IsNullOrWhiteSpace($json)) {
-            $errText = Get-Content -LiteralPath $tmpErr -Raw -ErrorAction SilentlyContinue
-            throw "Windows PowerShell call failed (exit $($p.ExitCode)): $errText"
-        }
-        if ([string]::IsNullOrWhiteSpace($json)) { return @() }
-        $parsed = $json | ConvertFrom-Json
-        return @($parsed)
+        & $Action
     }
-    finally {
-        Remove-Item -LiteralPath $tmpIn, $tmpOut, $tmpErr -Force -ErrorAction SilentlyContinue
+    catch {
+        Write-AuditLog -Level Error -Message "Phase '$Name' failed: $($_.Exception.Message)"
+        Add-UnavailableItem -Area $Name -Reason $_.Exception.Message
     }
 }
 
-function Request-AdministratorElevation {
+# =============================================================================
+#  Environment validation and prerequisites
+# =============================================================================
+
+function Test-IsAdministrator {
+    [CmdletBinding()]
+    param()
+    try {
+        $identity  = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = New-Object System.Security.Principal.WindowsPrincipal($identity)
+        return $principal.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        Write-AuditLog -Level Warn -Message "Administrator check failed: $($_.Exception.Message)"
+        return $false
+    }
+}
+
+function Get-HostOsInfo {
     <#
     .SYNOPSIS
-        Re-launches this script elevated via UAC, preserving bound parameters.
+        Returns OS caption, build, and whether this is a client or server SKU.
     #>
     [CmdletBinding()]
     param()
-
-    if ($script:BoundParameters.ContainsKey('Credential') -and
-        $script:BoundParameters['Credential'] -and
-        $script:BoundParameters['Credential'] -ne [System.Management.Automation.PSCredential]::Empty) {
-        Write-Error 'Cannot auto-elevate while -Credential is specified (credentials cannot be forwarded safely). Start an elevated PowerShell session and re-run with -Credential.'
-        exit 1
-    }
-
-    $hostExe = Join-Path -Path $PSHOME -ChildPath $(
-        if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
-    )
-    if (-not (Test-Path -LiteralPath $hostExe)) {
-        $hostExe = (Get-Process -Id $PID).Path
-    }
-
-    $scriptPath = $PSCommandPath
-    if (-not $scriptPath) { $scriptPath = $MyInvocation.MyCommand.Path }
-    if (-not $scriptPath -or -not (Test-Path -LiteralPath $scriptPath)) {
-        Write-Error 'Unable to resolve script path for elevation.'
-        exit 1
-    }
-
-    $argParts = [System.Collections.Generic.List[string]]::new()
-    [void]$argParts.Add('-NoProfile')
-    [void]$argParts.Add('-ExecutionPolicy Bypass')
-    [void]$argParts.Add('-File')
-    [void]$argParts.Add(('"{0}"' -f $scriptPath))
-
-    foreach ($key in $script:BoundParameters.Keys) {
-        if ($key -eq 'Credential') { continue }
-
-        $value = $script:BoundParameters[$key]
-        if ($value -is [System.Management.Automation.SwitchParameter]) {
-            if ($value.IsPresent) { [void]$argParts.Add("-$key") }
-            continue
-        }
-        if ($value -is [bool]) {
-            if ($value) { [void]$argParts.Add("-$key") }
-            continue
-        }
-
-        [void]$argParts.Add("-$key")
-        [void]$argParts.Add(('"{0}"' -f ([string]$value).Replace('"', '\"')))
-    }
-
-    $argumentList = $argParts -join ' '
-    Write-Host 'Administrator privileges required. Prompting for elevation (UAC)...' -ForegroundColor Yellow
-
-    try {
-        $proc = Start-Process -FilePath $hostExe -ArgumentList $argumentList -Verb RunAs -Wait -PassThru
-        if ($null -eq $proc) {
-            Write-Error 'Elevation failed or was cancelled.'
-            exit 1
-        }
-        exit $proc.ExitCode
-    }
-    catch {
-        Write-Error "Elevation failed or was cancelled: $_"
-        exit 1
+    $os = Get-CimInstance -ClassName Win32_OperatingSystem -ErrorAction Stop
+    [pscustomobject]@{
+        Caption     = $os.Caption
+        Version     = $os.Version
+        BuildNumber = $os.BuildNumber
+        ProductType = $os.ProductType          # 1 = workstation, 2 = DC, 3 = server
+        IsServer    = ($os.ProductType -ne 1)
+        IsDC        = ($os.ProductType -eq 2)
+        LastBoot    = $os.LastBootUpTime
+        Edition     = (Get-PropertySafe -InputObject $os -Name 'OperatingSystemSKU')
     }
 }
 
-function Test-IsDomainJoined {
-    try { return [bool](Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop).PartOfDomain }
-    catch { return $false }
-}
-
-function Get-EnvironmentInfo {
-    Write-Log 'Collecting environment information' -Level SECTION
-    $osInfo = Get-OSInfo
-    $psVer  = $PSVersionTable.PSVersion.ToString()
-    $psEd   = if ($PSVersionTable.PSEdition) { $PSVersionTable.PSEdition } else { 'Desktop' }
-
-    $dc = $DomainController
-    if (-not $dc) {
-        try { $dc = ([System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()).PdcRoleOwner.Name }
-        catch { $dc = if ($env:LOGONSERVER) { $env:LOGONSERVER.TrimStart('\') } else { 'Unknown' } }
-    }
-    $script:DC = $dc
-
-    if ([string]::IsNullOrEmpty($Domain)) {
-        try { $script:Domain = ([System.DirectoryServices.ActiveDirectory.Domain]::GetCurrentDomain()).Name }
-        catch {}
-    }
-
-    $site = 'Unknown'
-    try { $site = [System.DirectoryServices.ActiveDirectory.ActiveDirectorySite]::GetComputerSite().Name } catch {}
-    $fqdn = try { [System.Net.Dns]::GetHostEntry('').HostName } catch { "$($env:COMPUTERNAME).$Domain" }
-
-    $info = [pscustomobject]@{
-        ComputerName     = $env:COMPUTERNAME
-        FQDN             = $fqdn
-        Domain           = $Domain
-        DomainController = $dc
-        ADSite           = $site
-        CurrentUser      = "$env:USERDOMAIN\$env:USERNAME"
-        OSCaption        = $osInfo.Caption
-        OSBuild          = $osInfo.Build
-        OSIsClient       = $osInfo.IsClient
-        OSIsServer       = $osInfo.IsServer
-        PSVersion        = $psVer
-        PSEdition        = $psEd
-        IsAdmin          = Test-IsAdmin
-        IsDomainJoined   = Test-IsDomainJoined
-        AuditTarget      = $ComputerName
-        AuditUser        = if ($UserName) { $UserName } else { '(not specified)' }
-    }
-    Write-Log "  Computer : $($info.ComputerName)"
-    Write-Log "  Domain   : $($info.Domain)"
-    Write-Log "  DC       : $($info.DomainController)"
-    Write-Log "  OS       : $($info.OSCaption) [$($info.OSBuild)]"
-    Write-Log "  PS       : $psVer [$psEd]"
-    return $info
-}
-
-#endregion
-
-#region ── POWERSHELL MODULE LOADING ──────────────────────────────────────────
-
-function Import-RequiredModules {
-    Write-Log 'Loading required PowerShell modules' -Level SECTION
-    $psEd = $PSVersionTable.PSEdition
-
-    # GroupPolicy
-    if (Get-Module -Name GroupPolicy -ErrorAction SilentlyContinue) {
-        $script:GPModuleLoaded = $true
-        Write-Log '  GroupPolicy: already loaded.' -Level SUCCESS
-    } elseif ($psEd -eq 'Core') {
-        Write-Log '  PS 7 detected. Loading GroupPolicy via -UseWindowsPowerShell...' -Level WARN
-        try {
-            Import-Module GroupPolicy -UseWindowsPowerShell -ErrorAction Stop -WarningAction SilentlyContinue
-            $script:GPModuleLoaded = $true
-            Write-Log '  GroupPolicy: loaded via compatibility shim.' -Level SUCCESS
-        } catch {
-            Write-Log '  GroupPolicy FAILED to load in PS7. Re-run in powershell.exe (5.1).' -Level WARN
-            Add-Finding -Severity High -Category Prerequisites `
-                -Title  'GroupPolicy module not available in PowerShell 7' `
-                -Detail "Error: $_" `
-                -Recommendation 'Run this script in Windows PowerShell 5.1: powershell.exe -File .\Invoke-GPOAudit.ps1'
-        }
-    } else {
-        try {
-            Import-Module GroupPolicy -ErrorAction Stop
-            $script:GPModuleLoaded = $true
-            Write-Log '  GroupPolicy: loaded.' -Level SUCCESS
-        } catch {
-            Write-Log "  GroupPolicy module not available: $_" -Level WARN
-            Add-Finding -Severity High -Category Prerequisites `
-                -Title  'GroupPolicy module could not be loaded' `
-                -Detail "Error: $_" `
-                -Recommendation 'Install RSAT Group Policy Management Tools.'
+function Test-SupportedOperatingSystem {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][object]$OsInfo)
+    # Windows 10 = build 10240+, Server 2019 = 17763, 2022 = 20348, 2025 = 26100.
+    $build = 0
+    [void][int]::TryParse($OsInfo.BuildNumber, [ref]$build)
+    if ($OsInfo.IsServer) {
+        if ($build -lt 17763) {
+            Write-AuditLog -Level Warn -Message "Server build $build predates Windows Server 2019; RSAT feature names may differ."
         }
     }
-
-    # ActiveDirectory
-    if (Get-Module -Name ActiveDirectory -ErrorAction SilentlyContinue) {
-        $script:ADModuleLoaded = $true
-        Write-Log '  ActiveDirectory: already loaded.' -Level SUCCESS
-    } elseif ($psEd -eq 'Core') {
-        try {
-            Import-Module ActiveDirectory -UseWindowsPowerShell -ErrorAction Stop -WarningAction SilentlyContinue
-            $script:ADModuleLoaded = $true
-            Write-Log '  ActiveDirectory: loaded via compatibility shim.' -Level SUCCESS
-        } catch {
-            Write-Log "  ActiveDirectory not available in PS7 compat mode: $_" -Level WARN
-        }
-    } else {
-        try {
-            Import-Module ActiveDirectory -ErrorAction Stop
-            $script:ADModuleLoaded = $true
-            Write-Log '  ActiveDirectory: loaded.' -Level SUCCESS
-        } catch {
-            Write-Log "  ActiveDirectory module not available: $_" -Level WARN
-        }
-    }
-}
-
-#endregion
-
-#region ── RSAT PREREQUISITE CHECK AND INSTALLATION ───────────────────────────
-
-function Test-RSATAvailable {
-    param([pscustomobject]$OSInfo)
-    $gpOk = $false; $adOk = $false
-    if ($OSInfo.IsClient) {
-        try {
-            $gpOk = (Get-WindowsCapability -Online -Name 'Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0' -ErrorAction Stop).State -eq 'Installed'
-            $adOk = (Get-WindowsCapability -Online -Name 'Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0' -ErrorAction Stop).State -eq 'Installed'
-        } catch {}
-    } elseif ($OSInfo.IsServer) {
-        try {
-            $gpOk = (Get-WindowsFeature -Name GPMC               -ErrorAction Stop).Installed
-            $adOk = (Get-WindowsFeature -Name RSAT-AD-PowerShell -ErrorAction Stop).Installed
-        } catch {}
-    }
-    [pscustomobject]@{ GroupPolicyRSAT = $gpOk; ActiveDirectoryRSAT = $adOk }
-}
-
-function Install-RSATComponents {
-    [CmdletBinding(SupportsShouldProcess)]
-    param([pscustomobject]$OSInfo)
-    Write-Log 'Installing missing RSAT components' -Level SECTION
-    $rebootNeeded = $false
-
-    if ($OSInfo.IsClient) {
-        foreach ($cap in @('Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0','Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0')) {
-            try { $state = (Get-WindowsCapability -Online -Name $cap -ErrorAction Stop).State } catch { continue }
-            if ($state -eq 'Installed') { Write-Log "  Already installed: $cap" -Level SUCCESS; continue }
-            if ($PSCmdlet.ShouldProcess($cap, 'Add-WindowsCapability')) {
-                try {
-                    $r = Add-WindowsCapability -Online -Name $cap -ErrorAction Stop
-                    if ($r.RestartNeeded) { $rebootNeeded = $true }
-                    Write-Log "  Installed: $cap" -Level SUCCESS
-                } catch { Write-Log "  FAILED '$cap': $_" -Level ERROR }
-            }
-        }
-    } elseif ($OSInfo.IsServer) {
-        foreach ($feat in @('GPMC','RSAT-AD-PowerShell')) {
-            try { $installed = (Get-WindowsFeature -Name $feat -ErrorAction Stop).Installed } catch { continue }
-            if ($installed) { Write-Log "  Already installed: $feat" -Level SUCCESS; continue }
-            if ($PSCmdlet.ShouldProcess($feat, 'Install-WindowsFeature')) {
-                try {
-                    $r = Install-WindowsFeature -Name $feat -ErrorAction Stop
-                    if ($r.RestartNeeded -ne 'No') { $rebootNeeded = $true }
-                    Write-Log "  Installed: $feat" -Level SUCCESS
-                } catch { Write-Log "  FAILED '$feat': $_" -Level ERROR }
-            }
-        }
-    } else {
-        Write-Log '  OS not recognised. Cannot install RSAT automatically.' -Level WARN
-    }
-
-    if ($rebootNeeded) {
-        Write-Log '  RESTART REQUIRED to activate newly installed RSAT components.' -Level WARN
-        Add-Finding -Severity Medium -Category Prerequisites `
-            -Title  'Restart required after RSAT installation' `
-            -Detail 'One or more RSAT components need a reboot.' `
-            -Recommendation 'Restart and re-run the audit.'
-    }
-}
-
-#endregion
-
-#region ── CONNECTIVITY TESTING ───────────────────────────────────────────────
-
-function Test-TCPPort {
-    param([string]$HostName, [int]$Port, [int]$TimeoutMs = 2000)
-    $tcp = New-Object System.Net.Sockets.TcpClient
-    try {
-        $ar = $tcp.BeginConnect($HostName, $Port, $null, $null)
-        $ok = $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)
-        if ($ok -and $tcp.Connected) { $tcp.EndConnect($ar); return $true }
-        return $false
-    } catch { return $false }
-    finally  { $tcp.Close() }
-}
-
-function Test-DomainConnectivity {
-    param([string]$DC, [string]$DomainName)
-    Write-Log 'Testing domain connectivity' -Level SECTION
-    $r = [ordered]@{}
-
-    $r['DNS_Domain']     = try { $null = [System.Net.Dns]::GetHostAddresses($DomainName); 'OK' } catch { "FAILED: $_" }
-    $r['DC_Ping']        = try { if (Test-Connection $DC -Count 1 -Quiet -EA Stop) {'OK'} else {'FAILED: no ICMP'} } catch {"FAILED: $_"}
-    $r['LDAP_389']       = if (Test-TCPPort $DC 389)  { 'OK' } else { 'FAILED: TCP 389 unreachable' }
-    $r['GC_3268']        = if (Test-TCPPort $DC 3268) { 'OK' } else { 'FAILED: TCP 3268 unreachable' }
-    $r['SMB_445']        = if (Test-TCPPort $DC 445)  { 'OK' } else { 'FAILED: TCP 445 unreachable' }
-    $r['SYSVOL_Share']   = try { if (Test-Path "\\$DomainName\SYSVOL"   -EA Stop) {'OK'} else {'NOT ACCESSIBLE'} } catch {"FAILED: $_"}
-    $r['NETLOGON_Share'] = try { if (Test-Path "\\$DomainName\NETLOGON" -EA Stop) {'OK'} else {'NOT ACCESSIBLE'} } catch {"FAILED: $_"}
-
-    foreach ($k in $r.Keys) {
-        $lv = if ($r[$k] -eq 'OK') { 'SUCCESS' } else { 'WARN' }
-        Write-Log "  $k : $($r[$k])" -Level $lv
-    }
-    foreach ($k in $r.Keys) {
-        if ($r[$k] -ne 'OK') {
-            $sev = if ($k -in 'DNS_Domain','LDAP_389','DC_Ping') { 'High' } else { 'Medium' }
-            Add-Finding -Severity $sev -Category Connectivity `
-                -Title  "Connectivity failure: $k" -Detail $r[$k] `
-                -Recommendation "Verify network path to DC '$DC' and that the $k service is reachable."
-        }
-    }
-    return [pscustomobject]$r
-}
-
-function Test-RemoteTarget {
-    param([string]$Target)
-    if ($Target -eq $env:COMPUTERNAME) { return $true }
-    $winRM = $false; $cim = $false
-    try { Test-WSMan -ComputerName $Target -EA Stop | Out-Null; $winRM = $true } catch {}
-    try { Get-CimInstance Win32_ComputerSystem -ComputerName $Target -OperationTimeoutSec 8 -EA Stop | Out-Null; $cim = $true } catch {}
-    Write-Log "  Remote '$Target' — WinRM: $winRM  CIM/RPC: $cim"
-    if (-not $winRM -and -not $cim) {
-        Add-Finding -Severity High -Category Remote `
-            -Title  "Remote target '$Target' is unreachable" `
-            -Detail 'Neither WinRM nor CIM/RPC could be established.' `
-            -Recommendation 'Verify the machine is online, WinRM is enabled, and firewall allows PS Remoting and RPC.' `
-            -AffectedObject $Target
-        return $false
+    elseif ($build -lt 10240) {
+        throw "Unsupported operating system: $($OsInfo.Caption) (build $build). Windows 10 or later is required."
     }
     return $true
 }
 
-#endregion
+function Invoke-RelaunchInWindowsPowerShell {
+    <#
+    .SYNOPSIS
+        Re-executes this script under powershell.exe 5.1, forwarding all bound
+        parameters except -Credential (credentials are never serialized).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$BoundParameters)
 
-#region ── OUTPUT DIRECTORY ───────────────────────────────────────────────────
-
-function New-OutputDirectory {
-    param([pscustomobject]$EnvInfo)
-    if ([string]::IsNullOrEmpty($OutputPath)) {
-        $ts = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $script:RootOutput = "C:\GPOAudit\$($EnvInfo.AuditTarget)_$ts"
-    } else {
-        $script:RootOutput = $OutputPath
+    $exe = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    if (-not (Test-Path -LiteralPath $exe)) {
+        throw 'Windows PowerShell 5.1 (powershell.exe) was not found; cannot relaunch.'
     }
-    $subdirs = @('Summary','Computer','User','DomainGPOs','DomainGPOs\HTML','DomainGPOs\XML',
-                 'Links','Permissions','WMI-Filters','RSOP','EventLogs','RawData','Logs')
-    try {
-        New-Item -ItemType Directory -Path $script:RootOutput -Force | Out-Null
-        foreach ($s in $subdirs) {
-            New-Item -ItemType Directory -Path (Join-Path $script:RootOutput $s) -Force | Out-Null
+    $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $PSCommandPath))
+    foreach ($kvp in $BoundParameters.GetEnumerator()) {
+        if ($kvp.Key -in @('Credential', 'RelaunchInWindowsPowerShell')) { continue }
+        $value = $kvp.Value
+        if ($value -is [switch] -or $value -is [bool]) {
+            if ([bool]$value) { $argList += ('-{0}' -f $kvp.Key) }
         }
-        Write-Log "Output directory: $script:RootOutput" -Level SUCCESS
-    } catch {
-        Write-Error "Could not create output directory '$($script:RootOutput)': $_"
-        throw
-    }
-    $script:ReportPath = Join-Path $script:RootOutput 'Summary\GPOAudit_Report.html'
-    try {
-        Start-Transcript -Path (Join-Path $script:RootOutput 'Logs\Transcript.log') -Force | Out-Null
-    } catch {}
-}
-
-#endregion
-
-#region ── COMPUTER AD INFORMATION ────────────────────────────────────────────
-
-function Get-ComputerADInfo {
-    param([string]$Target, [string]$DomainName)
-    Write-Log "Collecting AD information for '$Target'" -Level SECTION
-
-    $info = [ordered]@{
-        ComputerName    = $Target; Domain = $DomainName
-        OU              = 'Unknown'; DN = 'Unknown'
-        OperatingSystem = 'Unknown'; OSVersion = 'Unknown'
-        LastLogon       = $null; PasswordLastSet = $null; Groups = ''; Error = ''
-    }
-
-    if ($script:ADModuleLoaded) {
-        try {
-            $props  = @('DistinguishedName','OperatingSystem','OperatingSystemVersion','LastLogonDate','PasswordLastSet','MemberOf')
-            $adComp = Get-ADComputer -Identity $Target -Properties $props -ErrorAction Stop
-            $info['DN']               = $adComp.DistinguishedName
-            $info['OU']               = $adComp.DistinguishedName -replace '^CN=[^,]+,', ''
-            $info['OperatingSystem']  = $adComp.OperatingSystem
-            $info['OSVersion']        = $adComp.OperatingSystemVersion
-            $info['LastLogon']        = $adComp.LastLogonDate
-            $info['PasswordLastSet']  = $adComp.PasswordLastSet
-            $info['Groups']           = ($adComp.MemberOf -join '; ')
-            Write-Log "  OU: $($info['OU'])" -Level SUCCESS
-        } catch {
-            Write-Log "  AD lookup failed: $_" -Level WARN; $info['Error'] = $_.ToString()
+        else {
+            $argList += ('-{0}' -f $kvp.Key)
+            $argList += ('"{0}"' -f $value)
         }
-    } else {
-        try {
-            $s = [adsisearcher]"(&(objectClass=computer)(cn=$Target))"
-            $r = $s.FindOne()
-            if ($r) {
-                $info['DN'] = $r.Properties['distinguishedname'][0]
-                $info['OU'] = $info['DN'] -replace '^CN=[^,]+,', ''
-                $info['OperatingSystem'] = if ($r.Properties['operatingsystem'].Count) { $r.Properties['operatingsystem'][0] } else { 'Unknown' }
-            }
-        } catch { Write-Log "  ADSI fallback failed: $_" -Level WARN }
     }
-
-    if ($Target -eq $env:COMPUTERNAME) {
-        try {
-            $os = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
-            $cs = Get-CimInstance Win32_ComputerSystem  -EA SilentlyContinue
-            if ($os) { $info['LastBootTime'] = $os.LastBootUpTime }
-            if ($cs) { $info['LoggedOnUser'] = $cs.UserName }
-            $adapters = Get-CimInstance Win32_NetworkAdapterConfiguration -Filter 'IPEnabled=True' -EA SilentlyContinue
-            $info['NetworkAdapters'] = $adapters | ForEach-Object {
-                "$($_.Description) IP=$($_.IPAddress -join ',') DNS=$($_.DNSServerSearchOrder -join ',')"
-            }
-        } catch {}
+    if ($BoundParameters.ContainsKey('Credential')) {
+        Write-Warning 'Credentials cannot be forwarded to the relaunched process; you will be prompted again if needed.'
     }
-    return [pscustomobject]$info
+    Write-Host "`nRelaunching in Windows PowerShell 5.1..." -ForegroundColor Yellow
+    Start-Process -FilePath $exe -ArgumentList $argList -Verb RunAs
+    exit 0
 }
 
-#endregion
-
-#region ── RSOP / GPRESULT COLLECTION ─────────────────────────────────────────
-
-function Invoke-GPResultCollection {
-    param([string]$Target, [string]$UserParam, [string]$OutDir)
-    Write-Log "Running gpresult for '$Target'" -Level SECTION
-
-    $isLocal = ($Target -eq $env:COMPUTERNAME)
-    $base    = if ($isLocal) { @() } else { @('/S', $Target) }
-    if ($UserParam) { $base += @('/USER', $UserParam) }
-
-    # /R
-    try { & gpresult.exe @($base + '/R') 2>&1 | Out-File (Join-Path $OutDir 'gpresult_R.txt') -Encoding UTF8 -Force
-          Write-Log '  gpresult /R saved.' -Level SUCCESS }
-    catch { Write-Log "  gpresult /R failed: $_" -Level WARN }
-
-    # /Z
-    try { & gpresult.exe @($base + '/Z') 2>&1 | Out-File (Join-Path $OutDir 'gpresult_Z.txt') -Encoding UTF8 -Force
-          Write-Log '  gpresult /Z saved.' -Level SUCCESS }
-    catch { Write-Log "  gpresult /Z failed: $_" -Level WARN }
-
-    # /H
-    $hPath = Join-Path $OutDir 'gpresult_H.html'
-    if (Test-Path $hPath -EA SilentlyContinue) { Remove-Item $hPath -Force -EA SilentlyContinue }
-    try { & gpresult.exe @($base + @('/H', $hPath, '/F')) 2>&1 | Out-Null
-          Write-Log '  gpresult /H saved.' -Level SUCCESS }
-    catch { Write-Log "  gpresult /H failed: $_" -Level WARN }
-
-    # /X
-    $xPath = Join-Path $OutDir 'gpresult_X.xml'
-    if (Test-Path $xPath -EA SilentlyContinue) { Remove-Item $xPath -Force -EA SilentlyContinue }
-    try { & gpresult.exe @($base + @('/X', $xPath, '/F')) 2>&1 | Out-Null
-          Write-Log '  gpresult /X saved.' -Level SUCCESS }
-    catch { Write-Log "  gpresult /X failed: $_" -Level WARN }
-
-    $rsop = [pscustomobject]@{
-        ComputerApplied = [System.Collections.Generic.List[pscustomobject]]::new()
-        ComputerDenied  = [System.Collections.Generic.List[pscustomobject]]::new()
-        UserApplied     = [System.Collections.Generic.List[pscustomobject]]::new()
-        UserDenied      = [System.Collections.Generic.List[pscustomobject]]::new()
+function Import-AuditModule {
+    <#
+    .SYNOPSIS
+        Imports one RSAT module, handling the PowerShell 7 compatibility layer.
+        Returns 'Native', 'WinPSCompat', or 'Unavailable'.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ProbeCommand
+    )
+    # Already loaded and functional?
+    if (Get-Command -Name $ProbeCommand -ErrorAction SilentlyContinue) {
+        return $(if ($PSVersionTable.PSEdition -eq 'Core') { 'WinPSCompat' } else { 'Native' })
     }
-
-    if (Test-Path $xPath -EA SilentlyContinue) {
+    if ($PSVersionTable.PSEdition -ne 'Core') {
         try {
-            [xml]$xDoc = Get-Content $xPath -Raw -Encoding Unicode -EA Stop
-            $ns = New-Object System.Xml.XmlNamespaceManager($xDoc.NameTable)
-            $ns.AddNamespace('r', 'http://www.microsoft.com/GroupPolicy/Rsop')
-
-            $compNodes = $xDoc.SelectNodes('//r:Logging/r:Computer/r:GPO', $ns)
-            $userNodes = $xDoc.SelectNodes('//r:Logging/r:User/r:GPO',     $ns)
-            if (-not $compNodes -or $compNodes.Count -eq 0) {
-                $compNodes = $xDoc.SelectNodes('//Computer/GPO')
-                $userNodes = $xDoc.SelectNodes('//User/GPO')
-            }
-
-            function ParseGPONodes($nodes, $scope) {
-                if (-not $nodes) { return }
-                foreach ($n in $nodes) {
-                    $applied = ($n.IsValid -eq 'true') -or ($n.Applied -eq 'true') -or
-                               ($n.AppliedOrder -and [int]$n.AppliedOrder -gt 0)
-                    $e = [pscustomobject]@{
-                        Name   = $n.Name
-                        Id     = $n.Id
-                        Order  = if ($n.AppliedOrder) { $n.AppliedOrder } else { '' }
-                        Reason = if ($n.DeniedReason) { $n.DeniedReason } else { '' }
-                    }
-                    if ($applied) {
-                        if ($scope -eq 'Computer') { $rsop.ComputerApplied.Add($e) } else { $rsop.UserApplied.Add($e) }
-                    } else {
-                        if ($scope -eq 'Computer') { $rsop.ComputerDenied.Add($e) } else { $rsop.UserDenied.Add($e) }
-                    }
-                }
-            }
-            ParseGPONodes $compNodes 'Computer'
-            ParseGPONodes $userNodes 'User'
-            Write-Log "  RSOP: CompApplied=$($rsop.ComputerApplied.Count) CompDenied=$($rsop.ComputerDenied.Count) UserApplied=$($rsop.UserApplied.Count) UserDenied=$($rsop.UserDenied.Count)" -Level SUCCESS
-        } catch { Write-Log "  RSOP XML parse failed: $_" -Level WARN }
-    }
-
-    # Get-GPResultantSetOfPolicy
-    if ($script:GPModuleLoaded) {
-        $gprsopPath = Join-Path $OutDir 'RSOP_GPModule.xml'
-        try {
-            $gprArgs = @{ ReportType='Xml'; Path=$gprsopPath; ErrorAction='Stop' }
-            $gprArgs['Computer'] = if ($isLocal) { $env:COMPUTERNAME } else { $Target }
-            Get-GPResultantSetOfPolicy @gprArgs | Out-Null
-            Write-Log '  Get-GPResultantSetOfPolicy XML saved.' -Level SUCCESS
-        } catch { Write-Log "  Get-GPResultantSetOfPolicy failed: $_" -Level WARN }
-    }
-
-    foreach ($d in $rsop.ComputerDenied) {
-        Add-Finding -Severity Low -Category RSOP `
-            -Title  "Computer GPO denied: '$($d.Name)'" `
-            -Detail "Denial reason: $($d.Reason)" `
-            -Recommendation 'Verify security group membership, WMI filter result, and link status.' `
-            -AffectedObject $d.Name
-    }
-    return $rsop
-}
-
-#endregion
-
-#region ── EVENT LOG COLLECTION ───────────────────────────────────────────────
-
-function Get-GPEventLog {
-    param([string]$Target, [string]$OutDir)
-    Write-Log "Collecting GP Operational events from '$Target'" -Level SECTION
-
-    $logName = 'Microsoft-Windows-GroupPolicy/Operational'
-    $isLocal = ($Target -eq $env:COMPUTERNAME)
-
-    try {
-        $params = @{ LogName=$logName; MaxEvents=2000; ErrorAction='Stop' }
-        if (-not $isLocal) { $params['ComputerName'] = $Target }
-        $events = Get-WinEvent @params
-        Write-Log "  Collected $($events.Count) event(s)." -Level SUCCESS
-
-        $events | Select-Object TimeCreated, Id, LevelDisplayName,
-                    @{N='Source';E={$_.ProviderName}}, Message |
-            Export-Csv (Join-Path $OutDir 'GP_Operational_Events.csv') -NoTypeInformation -Force
-        Write-Log '  Events exported to CSV.' -Level SUCCESS
-
-        if ($isLocal) {
-            try {
-                & wevtutil.exe epl $logName (Join-Path $OutDir 'GP_Operational.evtx') 2>&1 | Out-Null
-                Write-Log '  EVTX export saved.' -Level SUCCESS
-            } catch {}
-        }
-
-        $errWarn  = @($events | Where-Object { $_.Level -in 2,3 })
-        $slowLink = @($events | Where-Object { $_.Message -match 'slow.?link' })
-        $sysvolF  = @($events | Where-Object { $_.Message -match 'SYSVOL|NETLOGON' -and $_.Level -in 2,3 })
-        $dcDisc   = @($events | Where-Object { $_.Message -match 'domain controller' -and $_.Level -in 2,3 })
-
-        if ($errWarn.Count -gt 0)  { Add-Finding -Severity High   -Category EventLogs -Title "GP processing errors on '$Target' ($($errWarn.Count))"  -Detail 'Errors in GP/Operational log.' -Recommendation 'Review the GP Operational log.' -AffectedObject $Target }
-        if ($slowLink.Count -gt 0) { Add-Finding -Severity Medium -Category EventLogs -Title "Slow link detected on '$Target'"                         -Detail "$($slowLink.Count) slow-link event(s)." -Recommendation 'Review slow-link bandwidth thresholds.' -AffectedObject $Target }
-        if ($sysvolF.Count -gt 0)  { Add-Finding -Severity High   -Category EventLogs -Title "SYSVOL/NETLOGON errors on '$Target'"                    -Detail "$($sysvolF.Count) event(s)." -Recommendation 'Check SYSVOL replication: repadmin /replsummary.' -AffectedObject $Target }
-        if ($dcDisc.Count -gt 0)   { Add-Finding -Severity High   -Category EventLogs -Title "DC discovery errors on '$Target'"                       -Detail "$($dcDisc.Count) event(s)." -Recommendation 'Check DNS and site coverage.' -AffectedObject $Target }
-
-        return $events
-    } catch {
-        Write-Log "  Event log collection failed: $_" -Level WARN
-        Add-Finding -Severity Medium -Category EventLogs -Title "Could not collect event log from '$Target'" `
-            -Detail $_.ToString() -Recommendation 'Verify WinRM and firewall allow remote event log access.' -AffectedObject $Target
-        return @()
-    }
-}
-
-#endregion
-
-#region ── DOMAIN GPO INVENTORY ───────────────────────────────────────────────
-
-function Get-DomainGPOInventory {
-    param([string]$DomainName, [string]$DomainGPODir, [string]$RawDataDir)
-    Write-Log 'Enumerating domain GPO inventory' -Level SECTION
-
-    if (-not $script:GPModuleLoaded) { Write-Log '  GP module unavailable. Skipped.' -Level WARN; return @() }
-
-    $allGPOs = try { @(Get-GPO -All -Domain $DomainName -EA Stop) } catch { Write-Log "  Get-GPO -All failed: $_" -Level ERROR; return @() }
-    Write-Log "  Found $(Get-SafeCount $allGPOs) GPO(s)." -Level INFO
-
-    $inventory = [System.Collections.Generic.List[pscustomobject]]::new()
-    $total = Get-SafeCount $allGPOs; $idx = 0
-
-    foreach ($gpo in $allGPOs) {
-        $idx++
-        $displayName = [string](Get-ObjectProperty -InputObject $gpo -Name 'DisplayName' -Default 'Unknown')
-        $gpoId       = [string](Get-ObjectProperty -InputObject $gpo -Name 'Id' -Default '')
-        Write-Progress -Activity 'GPO Inventory' -Status "$displayName ($idx/$total)" `
-            -PercentComplete $(if ($total -gt 0) { [int](($idx / $total) * 100) } else { 0 })
-
-        try {
-            $gpoStatusRaw    = Get-ObjectProperty -InputObject $gpo -Name 'GpoStatus' -Default 'AllSettingsEnabled'
-            $gpoStatus       = $gpoStatusRaw.ToString()
-            $userEnabled     = $gpoStatus -notin @('UserSettingsDisabled','AllSettingsDisabled')
-            $computerEnabled = $gpoStatus -notin @('ComputerSettingsDisabled','AllSettingsDisabled')
-
-            $wmiObj    = Get-ObjectProperty -InputObject $gpo -Name 'WmiFilter'
-            $wmiFilter = ''
-            if ($null -ne $wmiObj -and -not [string]::IsNullOrWhiteSpace([string]$wmiObj) -and
-                -not (Test-IsDeserializedTypeName -Value $wmiObj -TypeName 'Microsoft.GroupPolicy.WmiFilter')) {
-                $wmiName = Get-ObjectProperty -InputObject $wmiObj -Name 'Name'
-                $wmiFilter = if ($null -ne $wmiName) { [string]$wmiName } else { [string]$wmiObj }
-            }
-
-            $versions = Get-GpoAdVersions -Gpo $gpo -DomainName $DomainName
-            $safeName = Get-SafeFileName $displayName
-            $xmlFile  = Join-Path $DomainGPODir "XML\$safeName.xml"
-            $htmlFile = Join-Path $DomainGPODir "HTML\$safeName.html"
-
-            $flags = @{ Scripts=$false; Prefs=$false; SchTasks=$false; DriveMaps=$false
-                        RegPrefs=$false; Printers=$false; SoftInst=$false; CPassword=$false; Empty=$false }
-            $linkCount = 0; $links = @()
-
-            try {
-                if ($gpoId) {
-                    Get-GPOReport -Guid $gpoId -ReportType Xml  -Domain $DomainName -Path $xmlFile  -EA Stop
-                    Get-GPOReport -Guid $gpoId -ReportType Html -Domain $DomainName -Path $htmlFile -EA Stop
-                }
-                [xml]$rXml = Get-Content $xmlFile -Raw -EA SilentlyContinue
-                if ($rXml) {
-                    $x = $rXml.OuterXml
-                    $flags.Scripts    = $x -match '<Script\b|<Scripts\b'
-                    $flags.Prefs      = $x -match '<Preferences\b|Preferences xmlns'
-                    $flags.SchTasks   = $x -match 'ScheduledTasks'
-                    $flags.DriveMaps  = $x -match 'DriveMapSettings|DriveMap'
-                    $flags.RegPrefs   = $x -match 'RegistrySettings|:Registry'
-                    $flags.Printers   = $x -match 'PrinterSettings|Printers'
-                    $flags.SoftInst   = $x -match 'SoftwareInstallation|ClassStore'
-                    $flags.CPassword  = $x -match 'cpassword'
-                    $compExt = Get-ObjectProperty -InputObject $rXml.GPO.Computer -Name 'ExtensionData'
-                    $userExt = Get-ObjectProperty -InputObject $rXml.GPO.User -Name 'ExtensionData'
-                    $flags.Empty = ($null -eq $compExt -and $null -eq $userExt)
-                    $lNodes = Get-ObjectProperty -InputObject $rXml.GPO -Name 'LinksTo'
-                    if ($lNodes) {
-                        $links = @($lNodes) | ForEach-Object {
-                            $somPath = [string](Get-ObjectProperty -InputObject $_ -Name 'SOMPath' -Default '')
-                            $somType = if ($somPath -eq $DomainName) { 'Domain' }
-                                       elseif ($somPath -match '[\\/]') { 'OU' }
-                                       else { 'Site' }
-                            [pscustomobject]@{
-                                SOMPath     = $somPath
-                                SOMName     = [string](Get-ObjectProperty -InputObject $_ -Name 'SOMName' -Default '')
-                                SOMType     = $somType
-                                LinkEnabled = ([string](Get-ObjectProperty -InputObject $_ -Name 'Enabled' -Default 'true') -ne 'false')
-                                Enforced    = ([string](Get-ObjectProperty -InputObject $_ -Name 'NoOverride' -Default 'false') -eq 'true')
-                            }
-                        }
-                        $linkCount = Get-SafeCount $links
-                    }
-                }
-            } catch { Write-Log "  Report failed for '$displayName': $_" -Level WARN }
-
-            $owner = Get-ObjectProperty -InputObject $gpo -Name 'Owner' -Default ''
-            $desc  = Get-ObjectProperty -InputObject $gpo -Name 'Description' -Default ''
-            $created  = Get-ObjectProperty -InputObject $gpo -Name 'CreationTime'
-            $modified = Get-ObjectProperty -InputObject $gpo -Name 'ModificationTime'
-            $domainNm = Get-ObjectProperty -InputObject $gpo -Name 'DomainName' -Default $DomainName
-
-            $entry = [pscustomobject]@{
-                Name = $displayName; Id = $gpoId.Trim('{}'); Domain = [string]$domainNm
-                Owner = [string]$owner; Description = [string]$desc
-                Created = $created; Modified = $modified
-                GpoStatus = $gpoStatus
-                UserSettingsEnabled = $userEnabled; ComputerSettingsEnabled = $computerEnabled
-                UserVersion = $versions.User; ComputerVersion = $versions.Computer
-                WmiFilter = $wmiFilter; LinkCount = $linkCount; Links = $links
-                HasScripts = $flags.Scripts; HasPreferences = $flags.Prefs; HasScheduledTasks = $flags.SchTasks
-                HasDriveMaps = $flags.DriveMaps; HasRegistryPrefs = $flags.RegPrefs
-                HasPrinters = $flags.Printers; HasSoftwareInstall = $flags.SoftInst
-                HasCPassword = $flags.CPassword; IsEmpty = $flags.Empty
-                XmlReportPath = $xmlFile; HtmlReportPath = $htmlFile
-            }
-            $inventory.Add($entry)
-
-            if ($flags.CPassword) {
-                Add-Finding -Severity Critical -Category Security `
-                    -Title  "cpassword in GPO: '$displayName'" `
-                    -Detail "GPO contains a Group Policy Preferences cpassword entry (MS14-025)." `
-                    -Recommendation 'Remove cpassword immediately. Deploy LAPS. Apply MS14-025 patch.' `
-                    -AffectedObject $displayName
-            }
+            Import-Module -Name $Name -ErrorAction Stop -Verbose:$false
+            if (Get-Command -Name $ProbeCommand -ErrorAction SilentlyContinue) { return 'Native' }
         }
         catch {
-            Write-Log "  Failed to inventory GPO '$displayName': $_" -Level WARN
+            Write-AuditLog -Level Warn -Message "Import-Module $Name failed: $($_.Exception.Message)"
         }
+        return 'Unavailable'
     }
-    Write-Progress -Activity 'GPO Inventory' -Completed
-
-    $inventory | Select-Object Name,Id,Domain,Owner,Description,Created,Modified,GpoStatus,
-        UserSettingsEnabled,ComputerSettingsEnabled,UserVersion,ComputerVersion,WmiFilter,
-        LinkCount,HasScripts,HasPreferences,HasScheduledTasks,HasDriveMaps,HasRegistryPrefs,
-        HasPrinters,HasSoftwareInstall,HasCPassword,IsEmpty |
-        Export-Csv (Join-Path $RawDataDir 'GPO_Inventory.csv') -NoTypeInformation -Force
-    $inventory | Select-Object Name,Id,Domain,Owner,GpoStatus,LinkCount,WmiFilter,HasCPassword,IsEmpty,Created,Modified |
-        ConvertTo-Json -Depth 3 | Out-File (Join-Path $RawDataDir 'GPO_Inventory.json') -Encoding UTF8 -Force
-
-    Write-Log "  Inventory complete: $($inventory.Count) GPOs." -Level SUCCESS
-    return , @($inventory.ToArray())
-}
-
-#endregion
-
-#region ── GPO LINK INVENTORY ─────────────────────────────────────────────────
-
-function ConvertFrom-GPLinkAttribute {
-    param(
-        [string]$GPLink,
-        [string]$TargetDN,
-        [string]$TargetType,
-        [bool]$BlockInheritance = $false
-    )
-    if ([string]::IsNullOrWhiteSpace($GPLink)) { return @() }
-
-    $results = [System.Collections.Generic.List[pscustomobject]]::new()
-    $rx = [regex]'\[LDAP://(?<path>[^\]]+);(?<opt>\d+)\]'
-    $order = 0
-    foreach ($m in $rx.Matches($GPLink)) {
-        $order++
-        $path = $m.Groups['path'].Value
-        $opt  = [int]$m.Groups['opt'].Value
-        $guid = if ($path -match '\{([0-9A-Fa-f-]{36})\}') { $Matches[1] } else { '' }
-        # Bit0 = link disabled, Bit1 = enforced (No Override)
-        $results.Add([pscustomobject]@{
-            GPOName           = ''
-            GPOId             = $guid
-            Target            = $TargetDN
-            TargetType        = $TargetType
-            LinkOrder         = $order
-            LinkEnabled       = (($opt -band 1) -eq 0)
-            Enforced          = (($opt -band 2) -ne 0)
-            BlockInheritance  = $BlockInheritance
-        })
-    }
-    return , @($results.ToArray())
-}
-
-function Get-GPOLinkInventory {
-    param([string]$DomainName, [string]$RawDataDir)
-    Write-Log 'Enumerating GPO links' -Level SECTION
-
-    $allLinks = [System.Collections.Generic.List[pscustomobject]]::new()
-    $gpoNameById = @{}
-
-    # Prefer LDAP gpLink — Get-GPInheritance GpoLink objects break under the PS7 WinPS shim.
+    # PowerShell 7: try native first (ActiveDirectory works natively on recent RSAT),
+    # then the Windows PowerShell compatibility layer.
     try {
-        $domDN = if ($script:ADModuleLoaded) {
-            (Get-ADDomain -Identity $DomainName -EA Stop).DistinguishedName
-        } else {
-            "DC=$($DomainName.Replace('.', ',DC='))"
-        }
-
-        # Cache GPO display names
-        if ($script:GPModuleLoaded) {
-            try {
-                foreach ($g in @(Get-GPO -All -Domain $DomainName -EA Stop)) {
-                    $id = [string](Get-ObjectProperty -InputObject $g -Name 'Id' -Default '')
-                    $nm = [string](Get-ObjectProperty -InputObject $g -Name 'DisplayName' -Default '')
-                    if ($id) { $gpoNameById[$id.Trim('{}').ToLower()] = $nm }
-                }
-            } catch {}
-        }
-
-        function Add-LinksFromDirectoryEntry {
-            param([string]$Dn, [string]$CType)
-            try {
-                $entry = [adsi]"LDAP://$Dn"
-                $gpLink = ''
-                if ($entry.Properties.Contains('gplink')) {
-                    $gpLink = [string]$entry.Properties['gplink'][0]
-                }
-                $blocked = $false
-                if ($entry.Properties.Contains('gpoptions')) {
-                    $blocked = (([int]$entry.Properties['gpoptions'][0]) -band 1) -ne 0
-                }
-                foreach ($lk in @(ConvertFrom-GPLinkAttribute -GPLink $gpLink -TargetDN $Dn -TargetType $CType -BlockInheritance $blocked)) {
-                    $key = $lk.GPOId.ToLower()
-                    if ($gpoNameById.ContainsKey($key)) { $lk.GPOName = $gpoNameById[$key] }
-                    $allLinks.Add($lk)
-                }
-            } catch {
-                Write-Log "  Link read failed for '$Dn': $_" -Level WARN
-            }
-        }
-
-        Add-LinksFromDirectoryEntry -Dn $domDN -CType 'Domain'
-        Write-Log '  Domain-level links collected.' -Level SUCCESS
-
-        try {
-            $cfgNC  = ([adsi]'LDAP://RootDSE').configurationNamingContext
-            $forest = [System.DirectoryServices.ActiveDirectory.Forest]::GetCurrentForest()
-            foreach ($site in $forest.Sites) {
-                Add-LinksFromDirectoryEntry -Dn "CN=$($site.Name),CN=Sites,$cfgNC" -CType 'Site'
-            }
-            Write-Log '  Site-level links collected.' -Level SUCCESS
-        } catch { Write-Log "  Site links failed: $_" -Level WARN }
-
-        if ($script:ADModuleLoaded) {
-            try {
-                $ous = @(Get-ADOrganizationalUnit -Filter * -Properties DistinguishedName -EA Stop)
-                $ouT = $ous.Count; $ouI = 0
-                foreach ($ou in $ous) {
-                    $ouI++
-                    Write-Progress -Activity 'OU Link Inventory' -Status "$($ou.Name) ($ouI/$ouT)" `
-                        -PercentComplete $(if ($ouT -gt 0) { [int](($ouI / $ouT) * 100) } else { 0 })
-                    Add-LinksFromDirectoryEntry -Dn $ou.DistinguishedName -CType 'OU'
-                }
-                Write-Progress -Activity 'OU Link Inventory' -Completed
-                Write-Log "  OU-level links collected ($ouT OUs)." -Level SUCCESS
-            } catch { Write-Log "  OU links failed: $_" -Level WARN }
+        Import-Module -Name $Name -ErrorAction Stop -Verbose:$false -WarningAction SilentlyContinue
+        if (Get-Command -Name $ProbeCommand -ErrorAction SilentlyContinue) { return 'Native' }
+    }
+    catch {
+        Write-AuditLog -Level Debug -Message "Native import of $Name under PS7 failed: $($_.Exception.Message)"
+    }
+    try {
+        Write-AuditLog -Level Info -Message "Attempting: Import-Module $Name -UseWindowsPowerShell"
+        Import-Module -Name $Name -UseWindowsPowerShell -ErrorAction Stop -Verbose:$false -WarningAction SilentlyContinue
+        # Verify the proxied cmdlet genuinely works, not merely exists.
+        if (Get-Command -Name $ProbeCommand -ErrorAction SilentlyContinue) {
+            Write-AuditLog -Level Warn -Message "$Name loaded through the Windows PowerShell compatibility layer. Objects are serialized; Windows PowerShell 5.1 is recommended for full fidelity."
+            return 'WinPSCompat'
         }
     }
     catch {
-        Write-Log "  LDAP link enumeration failed: $_. Falling back to Get-GPInheritance via Windows PowerShell." -Level WARN
-        try {
-            $native = Invoke-WindowsPowerShellJson -Script @"
-`$links = [System.Collections.Generic.List[object]]::new()
-function Add-NativeLinks(`$inherit, `$ctype) {
-    if (-not `$inherit) { return }
-    `$blocked = [bool]`$inherit.GpoInheritanceBlocked
-    foreach (`$lk in @(`$inherit.GpoLinks)) {
-        `$links.Add([pscustomobject]@{
-            GPOName = `$lk.DisplayName
-            GPOId = `$lk.GpoId.ToString().Trim('{}')
-            Target = `$inherit.Path
-            TargetType = `$ctype
-            LinkOrder = `$lk.Order
-            LinkEnabled = [bool]`$lk.Enabled
-            Enforced = [bool]`$lk.Enforced
-            BlockInheritance = `$blocked
-        })
+        Write-AuditLog -Level Warn -Message "Compatibility import of $Name failed: $($_.Exception.Message)"
     }
+    return 'Unavailable'
 }
-`$dom = Get-ADDomain -Identity '$DomainName'
-Add-NativeLinks (Get-GPInheritance -Target `$dom.DistinguishedName -Domain '$DomainName') 'Domain'
-Get-ADOrganizationalUnit -Filter * | ForEach-Object {
-    try { Add-NativeLinks (Get-GPInheritance -Target `$_.DistinguishedName -Domain '$DomainName') 'OU' } catch {}
-}
-`$links
-"@
-            foreach ($lk in @($native)) { $allLinks.Add([pscustomobject]$lk) }
-        } catch {
-            Write-Log "  Native link fallback also failed: $_" -Level WARN
+
+function Install-AuditPrerequisites {
+    <#
+    .SYNOPSIS
+        Detects and (with confirmation / -InstallPrerequisites) installs the RSAT
+        Group Policy and Active Directory tools. Honors -WhatIf. Read-only apart
+        from the installation itself.
+    #>
+    [CmdletBinding(SupportsShouldProcess = $true)]
+    param(
+        [Parameter(Mandatory)][object]$OsInfo,
+        [switch]$Unattended
+    )
+
+    $installed = @()
+    $failed    = @()
+
+    if (-not $OsInfo.IsServer) {
+        # ---------------- Windows 10 / 11 client: RSAT capabilities ----------------
+        $capabilityNames = @(
+            'Rsat.GroupPolicy.Management.Tools~~~~0.0.1.0',
+            'Rsat.ActiveDirectory.DS-LDS.Tools~~~~0.0.1.0'
+        )
+        if (-not (Get-Command -Name Get-WindowsCapability -ErrorAction SilentlyContinue)) {
+            throw "This operating system does not expose Get-WindowsCapability; RSAT Features on Demand are not supported here ($($OsInfo.Caption)). Install RSAT manually."
+        }
+        foreach ($capName in $capabilityNames) {
+            try {
+                $cap = Get-WindowsCapability -Online -Name $capName -ErrorAction Stop
+            }
+            catch {
+                Write-AuditLog -Level Error -Message "Capability query failed for ${capName}: $($_.Exception.Message)"
+                $failed += $capName
+                continue
+            }
+            if ($null -eq $cap) {
+                Write-AuditLog -Level Error -Message "Capability $capName is not available on this OS."
+                $failed += $capName
+                continue
+            }
+            if ($cap.State -eq 'Installed') {
+                Write-AuditLog -Level Success -Message "Capability already installed: $capName"
+                continue
+            }
+            $proceed = $false
+            if ($PSCmdlet.ShouldProcess($capName, 'Add-WindowsCapability -Online')) {
+                if ($Unattended) { $proceed = $true }
+                else {
+                    $proceed = $PSCmdlet.ShouldContinue(
+                        "Install Windows capability '$capName'? (requires internet or a configured FoD source)",
+                        'RSAT prerequisite missing')
+                }
+            }
+            if (-not $proceed) {
+                Write-AuditLog -Level Warn -Message "Skipped installation of $capName (operator declined or -WhatIf)."
+                $failed += $capName
+                continue
+            }
+            try {
+                Write-AuditLog -Level Info -Message "Installing capability $capName ..."
+                $result = Add-WindowsCapability -Online -Name $capName -ErrorAction Stop
+                $installed += $capName
+                if ($result -and (Get-PropertySafe -InputObject $result -Name 'RestartNeeded')) {
+                    $script:RestartNeeded = $true
+                }
+                Write-AuditLog -Level Success -Message "Installed capability $capName"
+            }
+            catch {
+                Write-AuditLog -Level Error -Message "Failed to install ${capName}: $($_.Exception.Message)"
+                $failed += $capName
+            }
+        }
+    }
+    else {
+        # ---------------- Windows Server: features ----------------
+        try {
+            Import-Module -Name ServerManager -ErrorAction Stop -Verbose:$false
+        }
+        catch {
+            throw "The ServerManager module is unavailable; cannot manage Windows features on $($OsInfo.Caption)."
+        }
+        foreach ($featureName in @('GPMC', 'RSAT-AD-PowerShell')) {
+            try {
+                $feature = Get-WindowsFeature -Name $featureName -ErrorAction Stop
+            }
+            catch {
+                Write-AuditLog -Level Error -Message "Feature query failed for ${featureName}: $($_.Exception.Message)"
+                $failed += $featureName
+                continue
+            }
+            if ($null -eq $feature) {
+                Write-AuditLog -Level Error -Message "Feature $featureName does not exist on this OS."
+                $failed += $featureName
+                continue
+            }
+            if ($feature.Installed) {
+                Write-AuditLog -Level Success -Message "Feature already installed: $featureName"
+                continue
+            }
+            $proceed = $false
+            if ($PSCmdlet.ShouldProcess($featureName, 'Install-WindowsFeature')) {
+                if ($Unattended) { $proceed = $true }
+                else {
+                    $proceed = $PSCmdlet.ShouldContinue(
+                        "Install Windows feature '$featureName'?", 'RSAT prerequisite missing')
+                }
+            }
+            if (-not $proceed) {
+                Write-AuditLog -Level Warn -Message "Skipped installation of $featureName (operator declined or -WhatIf)."
+                $failed += $featureName
+                continue
+            }
+            try {
+                Write-AuditLog -Level Info -Message "Installing feature $featureName ..."
+                $result = Install-WindowsFeature -Name $featureName -ErrorAction Stop
+                $installed += $featureName
+                $restart = Get-PropertySafe -InputObject $result -Name 'RestartNeeded'
+                if ("$restart" -match 'Yes|Pending') { $script:RestartNeeded = $true }
+                if (-not $result.Success) {
+                    Write-AuditLog -Level Error -Message "Install-WindowsFeature reported failure for $featureName (ExitCode: $($result.ExitCode))"
+                    $failed += $featureName
+                }
+                else {
+                    Write-AuditLog -Level Success -Message "Installed feature $featureName"
+                }
+            }
+            catch {
+                Write-AuditLog -Level Error -Message "Failed to install ${featureName}: $($_.Exception.Message)"
+                $failed += $featureName
+            }
         }
     }
 
-    $disabled = @($allLinks | Where-Object { -not $_.LinkEnabled })
-    $enforced = @($allLinks | Where-Object { $_.Enforced })
-    $blocked  = @($allLinks | Where-Object { $_.BlockInheritance } | Select-Object -ExpandProperty Target -Unique)
-
-    if ((Get-SafeCount $disabled) -gt 0) {
-        Add-Finding -Severity Low -Category Links -Title "$(Get-SafeCount $disabled) disabled GPO link(s)" `
-            -Detail "Disabled: $(($disabled.GPOName | Where-Object { $_ } | Select-Object -Unique) -join '; ')" `
-            -Recommendation 'Remove disabled links no longer needed.'
+    if ($script:RestartNeeded) {
+        Write-AuditLog -Level Warn -Message 'A RESTART IS REQUIRED to complete prerequisite installation. The audit will continue, but rerun after restarting if modules fail to load.'
     }
-    if ((Get-SafeCount $enforced) -gt 0) {
-        Add-Finding -Severity Medium -Category Links -Title "$(Get-SafeCount $enforced) enforced (No Override) link(s)" `
-            -Detail 'Enforced links override Block Inheritance.' `
-            -Recommendation 'Confirm each enforced link is intentional.'
+    [pscustomobject]@{
+        Installed     = $installed
+        Failed        = $failed
+        RestartNeeded = $script:RestartNeeded
     }
-    if ((Get-SafeCount $blocked) -gt 0) {
-        Add-Finding -Severity Medium -Category Links -Title "$(Get-SafeCount $blocked) OU(s) with Block Inheritance" `
-            -Detail ($blocked -join '; ') `
-            -Recommendation 'Use Block Inheritance sparingly; document business justification.'
-    }
-
-    $allLinks | Select-Object GPOName,GPOId,Target,TargetType,LinkOrder,LinkEnabled,Enforced,BlockInheritance |
-        Export-Csv (Join-Path $RawDataDir 'GPO_Links.csv') -NoTypeInformation -Force
-    $allLinks | Select-Object GPOName,GPOId,Target,TargetType,LinkOrder,LinkEnabled,Enforced,BlockInheritance |
-        ConvertTo-Json -Depth 3 | Out-File (Join-Path $RawDataDir 'GPO_Links.json') -Encoding UTF8 -Force
-
-    Write-Log "  Total link records: $($allLinks.Count)." -Level INFO
-    return , @($allLinks.ToArray())
 }
 
-#endregion
-
-#region ── SECURITY FILTERING / DELEGATION AUDIT ──────────────────────────────
-
-function Get-GPOPermissionsAudit {
-    param([pscustomobject[]]$GPOInventory, [string]$RawDataDir)
-    Write-Log 'Auditing GPO security filtering and delegation' -Level SECTION
-    if (-not $script:GPModuleLoaded) { Write-Log '  GP module unavailable. Skipped.' -Level WARN; return @() }
-
-    $allPerms = [System.Collections.Generic.List[pscustomobject]]::new()
-    $useNative = $PSVersionTable.PSEdition -eq 'Core'
-
-    if ($useNative) {
-        Write-Log '  PS 7 detected — collecting permissions via Windows PowerShell (Trustee objects break under the compatibility shim).'
-        try {
-            $native = Invoke-WindowsPowerShellJson -Depth 4 -Script @'
-$out = foreach ($g in Get-GPO -All) {
-    foreach ($p in Get-GPPermission -Guid $g.Id -All) {
-        [pscustomobject]@{
-            GPOName     = $g.DisplayName
-            GPOId       = $g.Id.ToString().Trim('{}')
-            Trustee     = $p.Trustee.Name
-            TrusteeSid  = $p.Trustee.Sid.ToString()
-            TrusteeType = $p.Trustee.SidType.ToString()
-            Permission  = $p.Permission.ToString()
-            Denied      = [bool]$p.Denied
+function Test-AuditConnectivity {
+    <#
+    .SYNOPSIS
+        Verifies DC discovery, DNS, LDAP, and SMB/SYSVOL reachability.
+        Records results as a dataset and raises findings for failures.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DomainName,
+        [Parameter()][string]$PreferredDC
+    )
+    $results = New-Object System.Collections.Generic.List[object]
+    $addResult = {
+        param($Test, $Target, $Ok, $Detail)
+        $results.Add([pscustomobject]@{
+                Test = $Test; Target = $Target; Success = [bool]$Ok; Detail = "$Detail"
+            })
+        if ($Ok) { Write-AuditLog -Level Success -Message "$Test -> $Target" }
+        else {
+            Write-AuditLog -Level Error -Message "$Test -> $Target : $Detail"
         }
     }
+
+    # --- Domain controller discovery ---
+    $dc = $PreferredDC
+    if (-not $dc) {
+        try {
+            $ctx = New-Object System.DirectoryServices.ActiveDirectory.DirectoryContext('Domain', $DomainName)
+            $dcObj = [System.DirectoryServices.ActiveDirectory.DomainController]::FindOne($ctx)
+            $dc = $dcObj.Name
+            & $addResult 'DC discovery' $DomainName $true "Found $dc (site: $($dcObj.SiteName))"
+        }
+        catch {
+            & $addResult 'DC discovery' $DomainName $false $_.Exception.Message
+            Add-AuditFinding -Severity High -Category 'Connectivity' -Title 'Domain controller discovery failed' `
+                -Detail $_.Exception.Message `
+                -Recommendation 'Verify DNS client settings, SRV records (_ldap._tcp.dc._msdcs), and site/subnet mappings.'
+            if ($env:LOGONSERVER) { $dc = $env:LOGONSERVER.TrimStart('\') }
+        }
+    }
+    else {
+        & $addResult 'DC discovery' $dc $true 'Operator-specified domain controller'
+    }
+
+    # --- ICMP / TCP reachability of the DC ---
+    if ($dc) {
+        $ping = Test-Connection -ComputerName $dc -Count 1 -Quiet -ErrorAction SilentlyContinue
+        & $addResult 'DC ping (ICMP)' $dc $ping $(if ($ping) { 'reachable' } else { 'no ICMP reply (may be firewalled - not fatal)' })
+    }
+
+    # --- DNS resolution ---
+    try {
+        $dnsAnswer = Resolve-DnsName -Name $DomainName -Type A -ErrorAction Stop
+        $ips = ($dnsAnswer | Where-Object { Get-PropertySafe -InputObject $_ -Name 'IPAddress' } |
+            ForEach-Object { $_.IPAddress }) -join ', '
+        & $addResult 'DNS resolution' $DomainName $true "Resolved: $ips"
+    }
+    catch {
+        & $addResult 'DNS resolution' $DomainName $false $_.Exception.Message
+        Add-AuditFinding -Severity Critical -Category 'Connectivity' -Title "DNS cannot resolve domain '$DomainName'" `
+            -Detail $_.Exception.Message `
+            -Recommendation 'Group Policy processing depends on DNS. Point the client at domain DNS servers.'
+    }
+
+    # --- LDAP: TCP 389 + an actual ADSI bind ---
+    $ldapTarget = $(if ($dc) { $dc } else { $DomainName })
+    $tcpOk = $false
+    try {
+        $tcp = New-Object System.Net.Sockets.TcpClient
+        $async = $tcp.BeginConnect($ldapTarget, 389, $null, $null)
+        if ($async.AsyncWaitHandle.WaitOne(5000) -and $tcp.Connected) { $tcpOk = $true }
+        $tcp.Close()
+    }
+    catch { $tcpOk = $false }
+    & $addResult 'LDAP TCP 389' $ldapTarget $tcpOk $(if ($tcpOk) { 'port open' } else { 'connection failed/timeout' })
+    try {
+        $rootDse = [ADSI]"LDAP://$ldapTarget/RootDSE"
+        $defaultNC = $rootDse.Get('defaultNamingContext')
+        & $addResult 'LDAP bind (RootDSE)' $ldapTarget $true "defaultNamingContext: $defaultNC"
+    }
+    catch {
+        & $addResult 'LDAP bind (RootDSE)' $ldapTarget $false $_.Exception.Message
+        Add-AuditFinding -Severity Critical -Category 'Connectivity' -Title 'LDAP bind to domain failed' `
+            -Detail $_.Exception.Message `
+            -Recommendation 'Verify network connectivity, firewall rules for TCP 389/636, and machine account health (Test-ComputerSecureChannel).'
+    }
+
+    # --- SMB: SYSVOL and NETLOGON ---
+    foreach ($share in @('SYSVOL', 'NETLOGON')) {
+        $unc = "\\$DomainName\$share"
+        $ok = $false
+        $detail = ''
+        try {
+            $ok = Test-Path -LiteralPath $unc -ErrorAction Stop
+            $detail = $(if ($ok) { 'accessible' } else { 'not accessible' })
+        }
+        catch { $detail = $_.Exception.Message }
+        & $addResult "SMB $share" $unc $ok $detail
+        if (-not $ok) {
+            Add-AuditFinding -Severity Critical -Category 'Connectivity' -Title "Cannot access $unc" `
+                -Detail $detail `
+                -Recommendation 'Clients must read SYSVOL/NETLOGON to apply policy. Check SMB connectivity (TCP 445), DFS namespace health, and SYSVOL replication (DFSR).'
+        }
+    }
+
+    Export-AuditDataset -Name 'ConnectivityTests' -Data $results.ToArray() -Folder $script:Paths.Summary
+    return @{ DomainController = $dc; Results = $results.ToArray() }
 }
-$out
-'@
-            foreach ($row in @($native)) {
-                $allPerms.Add([pscustomobject]@{
-                    GPOName     = [string]$row.GPOName
-                    GPOId       = [string]$row.GPOId
-                    Trustee     = [string]$row.Trustee
-                    TrusteeSid  = [string]$row.TrusteeSid
-                    TrusteeType = [string]$row.TrusteeType
-                    Permission  = [string]$row.Permission
-                    Denied      = [bool]$row.Denied
-                })
+
+# =============================================================================
+#  Target computer collection: identity, gpresult, RSOP, event logs
+# =============================================================================
+
+function Test-LocalTarget {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+    $short = ($Name -split '\.')[0]
+    return ($Name -in @('.', 'localhost') -or
+        $short -eq $env:COMPUTERNAME -or
+        $Name -eq $env:COMPUTERNAME)
+}
+
+function Test-TargetConnectivity {
+    <#
+    .SYNOPSIS
+        For remote targets: tests ping, WinRM, and CIM (WSMan then DCOM) and
+        opens a CIM session that later phases reuse.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Target)
+
+    $script:TargetOnline   = $false
+    $script:WinRMAvailable = $false
+    $script:CimSession     = $null
+
+    if ($script:IsLocalTarget) {
+        $script:TargetOnline = $true
+        return
+    }
+    Write-AuditLog -Level Info -Message "Testing connectivity to remote target $Target ..."
+    $script:TargetOnline = Test-Connection -ComputerName $Target -Count 2 -Quiet -ErrorAction SilentlyContinue
+    if (-not $script:TargetOnline) {
+        Write-AuditLog -Level Warn -Message "$Target does not answer ICMP; continuing (ping may be firewalled)."
+    }
+
+    # WinRM
+    try {
+        $wsmanParams = @{ ComputerName = $Target; ErrorAction = 'Stop' }
+        if ($script:HasCredential) { $wsmanParams.Credential = $Credential; $wsmanParams.Authentication = 'Default' }
+        $null = Test-WSMan @wsmanParams
+        $script:WinRMAvailable = $true
+        $script:TargetOnline   = $true
+        Write-AuditLog -Level Success -Message "WinRM is available on $Target"
+    }
+    catch {
+        Write-AuditLog -Level Warn -Message "WinRM unavailable on ${Target}: $($_.Exception.Message)"
+    }
+
+    # CIM: WSMan first, then DCOM fallback
+    foreach ($proto in @('Wsman', 'Dcom')) {
+        if ($script:CimSession) { break }
+        try {
+            $opt = New-CimSessionOption -Protocol $proto
+            $cimParams = @{ ComputerName = $Target; SessionOption = $opt; ErrorAction = 'Stop'; OperationTimeoutSec = 30 }
+            if ($script:HasCredential) { $cimParams.Credential = $Credential }
+            $script:CimSession = New-CimSession @cimParams
+            $script:TargetOnline = $true
+            Write-AuditLog -Level Success -Message "CIM session established to $Target via $proto"
+        }
+        catch {
+            Write-AuditLog -Level Warn -Message "CIM via $proto failed for ${Target}: $($_.Exception.Message)"
+        }
+    }
+    if (-not ($script:WinRMAvailable -or $script:CimSession)) {
+        Add-UnavailableItem -Area "Remote collection from $Target" `
+            -Reason 'Neither WinRM nor RPC/DCOM CIM connectivity is available. Only domain-side data can be collected. gpresult, event logs, and registry state require the target to be online and reachable.'
+    }
+}
+
+function Get-TargetComputerInfo {
+    <#
+    .SYNOPSIS
+        Collects identity, OS, network, and Group Policy client state for the
+        target computer (local directly; remote via CIM/WinRM/AD).
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Target)
+
+    $info = [ordered]@{
+        Hostname             = $Target
+        FQDN                 = 'UNAVAILABLE'
+        Domain               = 'UNAVAILABLE'
+        OrganizationalUnitDN = 'UNAVAILABLE'
+        ADSite               = 'UNAVAILABLE'
+        OperatingSystem      = 'UNAVAILABLE'
+        OSBuild              = 'UNAVAILABLE'
+        LastBootTime         = 'UNAVAILABLE'
+        LoggedOnUser         = 'UNAVAILABLE'
+        DomainController     = 'UNAVAILABLE'
+        NetworkAdapters      = 'UNAVAILABLE'
+        DNSServers           = 'UNAVAILABLE'
+        LoopbackMode         = 'Not configured'
+        GPProcessingNotes    = ''
+        LastGPRefreshMachine = 'UNAVAILABLE'
+        SlowLink             = 'See RSOP XML'
+        LocalGPOPresent      = 'UNAVAILABLE'
+    }
+
+    # ---- CIM data (OS, computer system, NICs) ----
+    $cimCommon = @{ ErrorAction = 'Stop' }
+    if (-not $script:IsLocalTarget) {
+        if ($script:CimSession) { $cimCommon.CimSession = $script:CimSession }
+        else { $cimCommon = $null }
+    }
+    if ($null -ne $cimCommon) {
+        try {
+            $cs = Get-CimInstance -ClassName Win32_ComputerSystem @cimCommon
+            $os = Get-CimInstance -ClassName Win32_OperatingSystem @cimCommon
+            $info.Hostname        = $cs.Name
+            $info.Domain          = $cs.Domain
+            $info.FQDN            = '{0}.{1}' -f $cs.DNSHostName, $cs.Domain
+            $info.OperatingSystem = $os.Caption
+            $info.OSBuild         = '{0} (build {1})' -f $os.Version, $os.BuildNumber
+            $info.LastBootTime    = $os.LastBootUpTime
+            $info.LoggedOnUser    = $(if ($cs.UserName) { $cs.UserName } else { '(no interactive user)' })
+            $nics = Get-CimInstance -ClassName Win32_NetworkAdapterConfiguration -Filter 'IPEnabled = TRUE' @cimCommon
+            $info.NetworkAdapters = ($nics | ForEach-Object {
+                    '{0} [{1}]' -f $_.Description, (@($_.IPAddress) -join ' ')
+                }) -join '; '
+            $info.DNSServers = ($nics | ForEach-Object { @($_.DNSServerSearchOrder) } |
+                Where-Object { $_ } | Select-Object -Unique) -join ', '
+        }
+        catch {
+            Add-UnavailableItem -Area 'Target CIM inventory' -Reason $_.Exception.Message
+        }
+    }
+    else {
+        Add-UnavailableItem -Area 'Target CIM inventory' -Reason 'No CIM connectivity to remote target.'
+    }
+
+    # ---- AD object: OU distinguished name ----
+    try {
+        if (Get-Command Get-ADComputer -ErrorAction SilentlyContinue) {
+            $short = ($Target -split '\.')[0]
+            $adComp = Get-ADComputer -Identity $short -Properties CanonicalName, DistinguishedName, OperatingSystem @script:AdParams -ErrorAction Stop
+            $info.OrganizationalUnitDN = ($adComp.DistinguishedName -replace '^CN=[^,]+,', '')
+            if ($info.FQDN -eq 'UNAVAILABLE') { $info.FQDN = $adComp.DNSHostName }
+            if ($info.OperatingSystem -eq 'UNAVAILABLE' -and $adComp.OperatingSystem) {
+                $info.OperatingSystem = "$($adComp.OperatingSystem) (from AD)"
+            }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'AD computer object' -Reason $_.Exception.Message
+    }
+
+    # ---- Group Policy client state (registry) + AD site + DC ----
+    $stateScript = {
+        $out = @{}
+        try {
+            $gpState = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\Machine'
+            if (Test-Path $gpState) {
+                $p = Get-ItemProperty -Path $gpState -ErrorAction SilentlyContinue
+                if ($p) {
+                    if ($p.PSObject.Properties['Site-Name'])            { $out.Site = $p.'Site-Name' }
+                    if ($p.PSObject.Properties['Distinguished-Name'])   { $out.DN   = $p.'Distinguished-Name' }
+                }
+            }
+            $hist = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\History'
+            if (Test-Path $hist) {
+                $h = Get-ItemProperty -Path $hist -ErrorAction SilentlyContinue
+                if ($h -and $h.PSObject.Properties['DCName']) { $out.DC = $h.DCName -replace '^\\\\', '' }
+            }
+            $loop = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\System' -Name UserPolicyMode -ErrorAction SilentlyContinue
+            if ($loop) {
+                $out.Loopback = switch ($loop.UserPolicyMode) { 1 { 'Merge' } 2 { 'Replace' } default { "Unknown ($($loop.UserPolicyMode))" } }
+            }
+            # Last machine GP refresh: Extension-List key write times approximate it;
+            # scheduled-task query is more reliable when available.
+            $gt = Get-ChildItem 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Group Policy\State\Machine\Extension-List' -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+            if ($gt) {
+                $ep = Get-ItemProperty -Path $gt.PSPath -ErrorAction SilentlyContinue
+                foreach ($n in 'EndTimeHi', 'EndTimeLo') {
+                    if (-not ($ep -and $ep.PSObject.Properties[$n])) { $ep = $null; break }
+                }
+                if ($ep) {
+                    $ft = ([Int64]$ep.EndTimeHi -shl 32) -bor ([Int64]$ep.EndTimeLo -band 0xFFFFFFFFL)
+                    try { $out.LastRefresh = [DateTime]::FromFileTime($ft).ToString('s') } catch { }
+                }
+            }
+            $out.LocalGpo = Test-Path (Join-Path $env:SystemRoot 'System32\GroupPolicy\gpt.ini')
+        }
+        catch { $out.Error = $_.Exception.Message }
+        $out
+    }
+    $state = $null
+    try {
+        if ($script:IsLocalTarget) { $state = & $stateScript }
+        elseif ($script:WinRMAvailable) {
+            $icm = @{ ComputerName = $Target; ScriptBlock = $stateScript; ErrorAction = 'Stop' }
+            if ($script:HasCredential) { $icm.Credential = $Credential }
+            $state = Invoke-Command @icm
+        }
+        else {
+            Add-UnavailableItem -Area 'Group Policy client registry state' -Reason 'Requires local execution or WinRM on the target.'
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'Group Policy client registry state' -Reason $_.Exception.Message
+    }
+    if ($state) {
+        if ($state.ContainsKey('Site'))        { $info.ADSite = $state.Site }
+        if ($state.ContainsKey('DC'))          { $info.DomainController = $state.DC }
+        if ($state.ContainsKey('Loopback'))    { $info.LoopbackMode = $state.Loopback }
+        if ($state.ContainsKey('LastRefresh')) { $info.LastGPRefreshMachine = $state.LastRefresh }
+        if ($state.ContainsKey('LocalGpo'))    { $info.LocalGPOPresent = $state.LocalGpo }
+        if ($state.ContainsKey('DN') -and $info.OrganizationalUnitDN -eq 'UNAVAILABLE') {
+            $info.OrganizationalUnitDN = ($state.DN -replace '^CN=[^,]+,', '')
+        }
+    }
+    if ($script:IsLocalTarget -and $info.ADSite -eq 'UNAVAILABLE') {
+        try { $info.ADSite = [System.DirectoryServices.ActiveDirectory.ActiveDirectorySite]::GetComputerSite().Name } catch { }
+    }
+    if ($info.LoopbackMode -notin @('Not configured')) {
+        Add-AuditFinding -Severity Informational -Category 'Processing' `
+            -Title "Loopback processing is enabled ($($info.LoopbackMode)) on $Target" `
+            -Detail 'User settings are drawn (Merge) or replaced (Replace) from GPOs scoped to the COMPUTER object.' `
+            -Recommendation 'Verify loopback is intentional; it commonly explains "unexpected" user policy results.' `
+            -RelatedObject $Target
+    }
+
+    $obj = [pscustomobject]$info
+    Export-AuditDataset -Name 'ComputerInfo' -Data @($obj) -Folder $script:Paths.Computer
+    return $obj
+}
+
+function Invoke-GpResultCollection {
+    <#
+    .SYNOPSIS
+        Runs gpresult /R, /Z, /H, /X for the computer (and user when specified),
+        locally or via WinRM for remote targets. Every variant is independent;
+        one failure never stops the rest.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter()][string]$User
+    )
+    $rsopDir = $script:Paths.RSOP
+
+    # Build the gpresult jobs. /H and /X produce files; /R and /Z produce text.
+    $jobs = @(
+        @{ Label = 'gpresult-R';  Args = @('/R');                    OutFile = $null;  Capture = $true }
+        @{ Label = 'gpresult-Z';  Args = @('/Z');                    OutFile = $null;  Capture = $true }
+        @{ Label = 'gpresult-H';  Args = @('/H');  Ext = 'html';     OutFile = 'GPResult.html'; Capture = $false }
+        @{ Label = 'gpresult-X';  Args = @('/X');  Ext = 'xml';      OutFile = 'GPResult.xml';  Capture = $false }
+    )
+
+    $userArgs = @()
+    if ($User) { $userArgs = @('/USER', $User) }
+    elseif (-not $script:IsLocalTarget) {
+        # Remote with no interactive user context: restrict to computer scope so
+        # gpresult does not fail looking for a logged-on user profile.
+        $userArgs = @('/SCOPE', 'COMPUTER')
+    }
+
+    foreach ($job in $jobs) {
+        $label = $job.Label
+        try {
+            if ($script:IsLocalTarget) {
+                if ($job.Capture) {
+                    $txtPath = Join-Path $rsopDir ("{0}.txt" -f $label)
+                    $output = & "$env:SystemRoot\System32\gpresult.exe" @($job.Args + $userArgs) 2>&1
+                    $exit = $LASTEXITCODE
+                    $output | Out-File -FilePath $txtPath -Encoding UTF8
+                    if ($exit -ne 0) { throw "gpresult exited with code $exit. Output: $(($output | Select-Object -First 3) -join ' ')" }
+                }
+                else {
+                    $filePath = Join-Path $rsopDir $job.OutFile
+                    $output = & "$env:SystemRoot\System32\gpresult.exe" @($job.Args + @($filePath, '/F') + $userArgs) 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "gpresult exited with code $LASTEXITCODE. Output: $(($output | Select-Object -First 3) -join ' ')" }
+                }
+                Write-AuditLog -Level Success -Message "$label collected"
+            }
+            elseif ($script:WinRMAvailable) {
+                # Remote: run on the target, write to its TEMP, copy the file back.
+                $icm = @{ ComputerName = $Target; ErrorAction = 'Stop' }
+                if ($script:HasCredential) { $icm.Credential = $Credential }
+                if ($job.Capture) {
+                    $txtPath = Join-Path $rsopDir ("{0}.txt" -f $label)
+                    $remoteArgs = $job.Args + $userArgs
+                    $output = Invoke-Command @icm -ScriptBlock {
+                        param($a) & "$env:SystemRoot\System32\gpresult.exe" @a 2>&1 | Out-String
+                    } -ArgumentList (, $remoteArgs)
+                    $output | Out-File -FilePath $txtPath -Encoding UTF8
+                }
+                else {
+                    $session = New-PSSession @icm
+                    try {
+                        $remoteFile = Invoke-Command -Session $session -ScriptBlock {
+                            param($a, $name)
+                            $f = Join-Path $env:TEMP $name
+                            & "$env:SystemRoot\System32\gpresult.exe" @($a + @($f, '/F')) 2>&1 | Out-Null
+                            if (Test-Path $f) { $f } else { $null }
+                        } -ArgumentList (, ($job.Args + $userArgs)), $job.OutFile
+                        if ($remoteFile) {
+                            Copy-Item -FromSession $session -Path $remoteFile -Destination (Join-Path $rsopDir $job.OutFile) -ErrorAction Stop
+                            Invoke-Command -Session $session -ScriptBlock { param($f) Remove-Item $f -ErrorAction SilentlyContinue } -ArgumentList $remoteFile
+                        }
+                        else { throw 'gpresult did not produce an output file on the remote host.' }
+                    }
+                    finally { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+                }
+                Write-AuditLog -Level Success -Message "$label collected remotely via WinRM"
+            }
+            else {
+                # Last resort: gpresult /S uses RPC with the CURRENT user's context.
+                # /U /P is deliberately NOT used - it would expose a password on the
+                # command line and in process listings.
+                if ($script:HasCredential) {
+                    Write-AuditLog -Level Warn -Message "gpresult /S cannot use -Credential safely; running as current user. Enable WinRM on $Target for credentialed collection."
+                }
+                if ($job.Capture) {
+                    $txtPath = Join-Path $rsopDir ("{0}.txt" -f $label)
+                    $output = & "$env:SystemRoot\System32\gpresult.exe" @(@('/S', $Target) + $job.Args + $userArgs) 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "gpresult /S exited with code $LASTEXITCODE" }
+                    $output | Out-File -FilePath $txtPath -Encoding UTF8
+                }
+                else {
+                    $filePath = Join-Path $rsopDir $job.OutFile
+                    $output = & "$env:SystemRoot\System32\gpresult.exe" @(@('/S', $Target) + $job.Args + @($filePath, '/F') + $userArgs) 2>&1
+                    if ($LASTEXITCODE -ne 0) { throw "gpresult /S exited with code $LASTEXITCODE" }
+                }
+                Write-AuditLog -Level Success -Message "$label collected remotely via RPC (gpresult /S)"
             }
         }
         catch {
-            Write-Log "  Native permissions collection failed: $_" -Level WARN
-            $useNative = $false
+            Write-AuditLog -Level Error -Message "$label failed: $($_.Exception.Message)"
+            Add-UnavailableItem -Area $label -Reason $_.Exception.Message
         }
     }
-
-    if (-not $useNative) {
-        $total = Get-SafeCount $GPOInventory; $idx = 0
-        foreach ($gpo in $GPOInventory) {
-            $idx++
-            Write-Progress -Activity 'GPO Permissions' -Status "$($gpo.Name) ($idx/$total)" `
-                -PercentComplete $(if ($total -gt 0) { [int](($idx / $total) * 100) } else { 0 })
-            try {
-                $perms = @(Get-GPPermission -Guid $gpo.Id -All -EA Stop)
-                foreach ($p in $perms) {
-                    $trusteeObj = Get-ObjectProperty -InputObject $p -Name 'Trustee'
-                    if (Test-IsDeserializedTypeName -Value $trusteeObj -TypeName 'Microsoft.GroupPolicy.GPTrustee') {
-                        Write-Log "  Trustee deserialization failed for '$($gpo.Name)' — re-run under Windows PowerShell 5.1 for full ACL detail." -Level WARN
-                        break
-                    }
-                    $trustee  = [string](Get-ObjectProperty -InputObject $trusteeObj -Name 'Name' -Default '')
-                    $sidObj   = Get-ObjectProperty -InputObject $trusteeObj -Name 'Sid'
-                    $sidStr   = if ($null -ne $sidObj) { $sidObj.ToString() } else { '' }
-                    $sidType  = [string](Get-ObjectProperty -InputObject $trusteeObj -Name 'SidType' -Default '')
-                    $permStr  = [string](Get-ObjectProperty -InputObject $p -Name 'Permission' -Default '')
-                    $denied   = [bool](Get-ObjectProperty -InputObject $p -Name 'Denied' -Default $false)
-                    $allPerms.Add([pscustomobject]@{
-                        GPOName = $gpo.Name; GPOId = $gpo.Id
-                        Trustee = $trustee; TrusteeSid = $sidStr
-                        TrusteeType = $sidType.ToString(); Permission = $permStr.ToString(); Denied = $denied
-                    })
-                }
-            } catch { Write-Log "  Permissions failed for '$($gpo.Name)': $_" -Level WARN }
-        }
-        Write-Progress -Activity 'GPO Permissions' -Completed
-    }
-
-    # Findings from collected ACE rows
-    $byGpo = $allPerms | Group-Object GPOId
-    foreach ($grp in @($byGpo)) {
-        $rows = @($grp.Group)
-        $gpoName = $rows[0].GPOName
-        $gpoMeta = @($GPOInventory | Where-Object { $_.Id -eq $grp.Name } | Select-Object -First 1)
-        $status  = if ($gpoMeta) { $gpoMeta.GpoStatus } else { '' }
-
-        $applyPerms = @($rows | Where-Object { $_.Permission -eq 'GpoApply' -and -not $_.Denied })
-        if ((Get-SafeCount $applyPerms) -eq 0 -and $status -ne 'AllSettingsDisabled') {
-            Add-Finding -Severity High -Category Security `
-                -Title  "No 'Apply Group Policy' permission on '$gpoName'" `
-                -Detail 'No principal has Apply Group Policy. This GPO will never apply to any object.' `
-                -Recommendation 'Add Apply Group Policy to Authenticated Users or a targeted security group.' `
-                -AffectedObject $gpoName
-        }
-
-        foreach ($p in $rows) {
-            $trustee = $p.Trustee; $permStr = $p.Permission; $sidType = $p.TrusteeType
-            if ($sidType -eq 'Unknown' -or $trustee -match '^S-1-') {
-                Add-Finding -Severity Medium -Category Security -Title "Unresolved SID on '$gpoName'" `
-                    -Detail "SID: $($p.TrusteeSid) | Permission: $permStr" `
-                    -Recommendation 'Remove the orphaned SID from the GPO ACL.' -AffectedObject $gpoName
-            }
-            if ($trustee -match '^Everyone$|^Anonymous') {
-                Add-Finding -Severity High -Category Security -Title "Overly broad permission on '$gpoName'" `
-                    -Detail "'$trustee' has '$permStr'." `
-                    -Recommendation "Remove 'Everyone' or 'Anonymous' from this GPO's ACL." -AffectedObject $gpoName
-            }
-            if ($permStr -in 'GpoEdit','GpoEditDeleteModifySecurity') {
-                if ($trustee -notmatch 'Domain Admins|Enterprise Admins|Group Policy Creator Owners|SYSTEM|Administrators') {
-                    Add-Finding -Severity High -Category Security -Title "Non-standard editor on '$gpoName'" `
-                        -Detail "'$trustee' has '$permStr'." `
-                        -Recommendation "Confirm '$trustee' requires edit rights." -AffectedObject $gpoName
-                }
-            }
-            if ($permStr -eq 'GpoApply') {
-                $hasRead = @($rows | Where-Object { $_.Trustee -eq $trustee -and $_.Permission -eq 'GpoRead' })
-                if ((Get-SafeCount $hasRead) -eq 0) {
-                    Add-Finding -Severity Medium -Category Security -Title "Apply without Read on '$gpoName'" `
-                        -Detail "'$trustee' has Apply but not Read." `
-                        -Recommendation "Add Read permission for '$trustee' on this GPO." -AffectedObject $gpoName
-                }
-            }
-        }
-    }
-
-    $allPerms | Export-Csv (Join-Path $RawDataDir 'GPO_Permissions.csv') -NoTypeInformation -Force
-    $allPerms | ConvertTo-Json -Depth 3 | Out-File (Join-Path $RawDataDir 'GPO_Permissions.json') -Encoding UTF8 -Force
-    Write-Log "  Permissions audit complete: $($allPerms.Count) ACE record(s)." -Level SUCCESS
-    return , @($allPerms.ToArray())
 }
 
-#endregion
-
-#region ── WMI FILTER AUDIT ───────────────────────────────────────────────────
-
-function Get-WMIFilterAudit {
-    param([pscustomobject[]]$GPOInventory, [string]$DomainName, [string]$RawDataDir)
-    Write-Log 'Auditing WMI filters' -Level SECTION
-    $wmiFilters = [System.Collections.Generic.List[pscustomobject]]::new()
-
-    try {
-        $domDN = if ($script:ADModuleLoaded) { (Get-ADDomain -Identity $DomainName -EA Stop).DistinguishedName }
-                 else { "DC=$($DomainName.Replace('.', ',DC='))" }
-        $s = [adsisearcher]'(objectClass=msWMI-SomFilter)'
-        $s.SearchRoot = [adsi]"LDAP://CN=SOM,CN=WMIPolicy,CN=System,$domDN"
-        $s.PageSize   = 1000
-        $results      = $s.FindAll()
-        foreach ($r in $results) {
-            $p     = $r.Properties
-            $parm2 = if ($p['mswmi-parm2'].Count) { $p['mswmi-parm2'][0].ToString() } else { '' }
-            $parts = $parm2 -split ';'
-            $ns    = if ($parts.Count -ge 2) { $parts[1] } else { 'root\CIMv2' }
-            $query = if ($parts.Count -ge 4) { $parts[3..($parts.Count-1)] -join ';' } else { $parm2 }
-
-            $nameStr = if ($p['mswmi-name'].Count)         { $p['mswmi-name'][0].ToString() }         else { 'Unknown' }
-            $isW32P  = $query -match 'Win32_Product'
-            $isBroad = $query -match 'Win32_Product|SELECT \* FROM Win32_'
-
-            $f = [pscustomobject]@{
-                Name    = $nameStr
-                Description  = if ($p['mswmi-parm1'].Count)        { $p['mswmi-parm1'][0].ToString() }        else { '' }
-                Author       = if ($p['mswmi-author'].Count)        { $p['mswmi-author'][0].ToString() }       else { '' }
-                Created      = if ($p['mswmi-creationdate'].Count)  { $p['mswmi-creationdate'][0].ToString() } else { '' }
-                Modified     = if ($p['mswmi-changedate'].Count)    { $p['mswmi-changedate'][0].ToString() }   else { '' }
-                Namespace    = $ns; Query = $query
-                IsWin32Product = $isW32P; BroadOrExpensive = $isBroad
-                UsedByGPOs   = [System.Collections.Generic.List[string]]::new()
-            }
-            $wmiFilters.Add($f)
-            if ($isW32P)  { Add-Finding -Severity High   -Category WMIFilters -Title "WMI filter uses Win32_Product: '$nameStr'" -Detail "Query: $query" -Recommendation 'Replace Win32_Product with Win32_InstalledWin32Program or registry-based detection.' -AffectedObject $nameStr }
-            elseif ($isBroad) { Add-Finding -Severity Medium -Category WMIFilters -Title "Expensive WMI filter: '$nameStr'" -Detail "Query: $query" -Recommendation 'Narrow query scope to avoid slowing Group Policy processing.' -AffectedObject $nameStr }
-        }
-        $results.Dispose()
-        Write-Log "  Found $($wmiFilters.Count) WMI filter(s)." -Level INFO
-    } catch { Write-Log "  WMI filter enumeration failed: $_" -Level WARN }
-
-    foreach ($gpo in $GPOInventory) {
-        $wmiRef = Get-ObjectProperty -InputObject $gpo -Name 'WmiFilter' -Default ''
-        if (-not [string]::IsNullOrEmpty([string]$wmiRef)) {
-            $m = @($wmiFilters | Where-Object { $_.Name -eq $wmiRef } | Select-Object -First 1)
-            $gpoName = Get-ObjectProperty -InputObject $gpo -Name 'Name' -Default 'Unknown'
-            if (-not $m) {
-                Add-Finding -Severity High -Category WMIFilters -Title "Broken WMI filter ref on '$gpoName'" `
-                    -Detail "GPO references WMI filter '$wmiRef' which does not exist." `
-                    -Recommendation 'Fix or remove the broken WMI filter reference. GPO will not apply until corrected.' -AffectedObject $gpoName
-            } else { $m.UsedByGPOs.Add([string]$gpoName) }
-        }
-    }
-    $wmiFilters | Where-Object { $_.UsedByGPOs.Count -eq 0 } | ForEach-Object {
-        Add-Finding -Severity Low -Category WMIFilters -Title "Unused WMI filter: '$($_.Name)'" `
-            -Detail 'Not assigned to any GPO.' -Recommendation 'Remove unused WMI filters.' -AffectedObject $_.Name
-    }
-    $wmiFilters | Select-Object Name,Description,Author,Created,Modified,Namespace,Query,IsWin32Product,BroadOrExpensive |
-        Export-Csv (Join-Path $RawDataDir 'WMI_Filters.csv') -NoTypeInformation -Force
-    return $wmiFilters
-}
-
-#endregion
-
-#region ── SYSVOL CONSISTENCY CHECK ───────────────────────────────────────────
-
-function Test-SYSVOLConsistency {
-    param([string]$DomainName, [pscustomobject[]]$GPOInventory, [string]$RawDataDir)
-    Write-Log 'Checking SYSVOL / AD consistency' -Level SECTION
-
-    $base = "\\$DomainName\SYSVOL\$DomainName\Policies"
-    $ok   = try { Test-Path $base -EA Stop } catch { $false }
-
-    if (-not $ok) {
-        Write-Log "  SYSVOL not accessible: $base" -Level WARN
-        Add-Finding -Severity High -Category SYSVOL -Title 'SYSVOL not accessible' `
-            -Detail "Path: $base" -Recommendation 'Verify SYSVOL replication: repadmin /replsummary and dcdiag /test:sysvolcheck'
-        return $null
-    }
-    Write-Log "  SYSVOL accessible." -Level SUCCESS
-
-    $sysvolGuids = try {
-        Get-ChildItem $base -Directory -EA Stop |
-            Where-Object { $_.Name -match '^\{[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\}$' } |
-            ForEach-Object { $_.Name.Trim('{}').ToLower() }
-    } catch { @() }
-
-    $adGuids      = @($GPOInventory | ForEach-Object { $_.Id.ToLower() })
-    $onlySysvol   = @($sysvolGuids | Where-Object { $_ -notin $adGuids })
-    $onlyAD       = @($adGuids     | Where-Object { $_ -notin $sysvolGuids })
-
-    Write-Log "  AD GPOs: $($adGuids.Count)  SYSVOL GPOs: $($sysvolGuids.Count)  Only SYSVOL: $($onlySysvol.Count)  Only AD: $($onlyAD.Count)"
-
-    if ($onlySysvol.Count -gt 0) { Add-Finding -Severity High -Category SYSVOL -Title "$($onlySysvol.Count) orphaned SYSVOL folder(s) with no AD object" -Detail ($onlySysvol -join ', ') -Recommendation 'Investigate; may be remnants of deleted GPOs. Verify before removing.' }
-    if ($onlyAD.Count -gt 0)     { Add-Finding -Severity High -Category SYSVOL -Title "$($onlyAD.Count) AD GPO(s) missing SYSVOL folder"                 -Detail ($onlyAD -join ', ')     -Recommendation 'Check SYSVOL replication. Broken GPOs must be recreated or deleted.' }
-
-    $mismatches = [System.Collections.Generic.List[pscustomobject]]::new()
-    foreach ($gpo in $GPOInventory) {
-        $gptPath = Join-Path $base "{$($gpo.Id)}\GPT.INI"
-        if (-not (Test-Path $gptPath -EA SilentlyContinue)) { continue }
-        try {
-            $vLine = Get-Content $gptPath -EA Stop | Where-Object { $_ -match '^\s*Version\s*=' } | Select-Object -First 1
-            if ($vLine) {
-                $sysVer = [int]($vLine -replace '.*=\s*', '').Trim()
-                $adVer  = ($gpo.UserVersion -shl 16) -bor $gpo.ComputerVersion
-                if ($sysVer -ne $adVer) {
-                    $mismatches.Add([pscustomobject]@{ GPOName=$gpo.Name; ADVersion=$adVer; SYSVOLVersion=$sysVer })
-                    Add-Finding -Severity High -Category SYSVOL -Title "GPT.INI version mismatch: '$($gpo.Name)'" `
-                        -Detail "AD: $adVer | SYSVOL: $sysVer — replication problem." `
-                        -Recommendation 'Run repadmin /replsummary. Consider gpfixup for widespread issues.' -AffectedObject $gpo.Name
-                }
-            }
-        } catch {}
-    }
-
-    Write-Log '  Scanning SYSVOL for cpassword...'
-    try {
-        $cpFiles = @(Get-ChildItem $base -Recurse -Filter '*.xml' -EA SilentlyContinue |
-            Select-String -Pattern 'cpassword' -List -EA SilentlyContinue |
-            Select-Object -ExpandProperty Filename -Unique)
-        if ($cpFiles.Count -gt 0) {
-            Add-Finding -Severity Critical -Category SYSVOL -Title 'cpassword entries found in SYSVOL' `
-                -Detail "Files: $($cpFiles -join ', ')" `
-                -Recommendation 'Remove all cpassword entries immediately. Apply MS14-025. Use LAPS for local admin passwords.'
-        } else { Write-Log '  No cpassword entries in SYSVOL.' -Level SUCCESS }
-    } catch { Write-Log "  SYSVOL cpassword scan failed: $_" -Level WARN }
-
-    $result = [pscustomobject]@{
-        SYSVOLAccessible  = $true
-        ADGPOCount        = $adGuids.Count
-        SYSVOLGPOCount    = $sysvolGuids.Count
-        OnlyInSYSVOL      = $onlySysvol
-        OnlyInAD          = $onlyAD
-        VersionMismatches = $mismatches
-    }
-    [pscustomobject]@{
-        ADGPOCount=($adGuids.Count); SYSVOLGPOCount=($sysvolGuids.Count)
-        OnlyInSYSVOL=($onlySysvol -join '; '); OnlyInAD=($onlyAD -join '; ')
-        VersionMismatches=$mismatches.Count
-    } | Export-Csv (Join-Path $RawDataDir 'SYSVOL_Consistency.csv') -NoTypeInformation -Force
-    return $result
-}
-
-#endregion
-
-#region ── FINDINGS ANALYSIS ──────────────────────────────────────────────────
-
-function Invoke-FindingsAnalysis {
-    param([pscustomobject[]]$GPOInventory, [pscustomobject[]]$AllLinks)
-    Write-Log 'Running findings analysis' -Level SECTION
-
-    $linkedIds = @($AllLinks | Select-Object -ExpandProperty GPOId -Unique)
-    $now       = Get-Date
-
-    foreach ($gpo in $GPOInventory) {
-        if ($gpo.Id -notin $linkedIds) {
-            Add-Finding -Severity Medium -Category Hygiene -Title "Unlinked GPO: '$($gpo.Name)'" `
-                -Detail 'Not linked to any site, domain, or OU. Has no effect.' `
-                -Recommendation 'Link if still needed, or delete.' -AffectedObject $gpo.Name
-        }
-        if ($gpo.IsEmpty) {
-            Add-Finding -Severity Low -Category Hygiene -Title "Empty GPO: '$($gpo.Name)'" `
-                -Detail 'No computer or user settings.' `
-                -Recommendation 'Delete empty GPOs to reduce processing overhead.' -AffectedObject $gpo.Name
-        }
-        if ($gpo.GpoStatus -eq 'AllSettingsDisabled') {
-            Add-Finding -Severity Low -Category Hygiene -Title "Fully disabled GPO: '$($gpo.Name)'" `
-                -Detail 'Both halves disabled. Applies nothing.' `
-                -Recommendation 'Delete if no longer needed.' -AffectedObject $gpo.Name
-        }
-        if ($gpo.GpoStatus -in 'UserSettingsDisabled','ComputerSettingsDisabled') {
-            Add-Finding -Severity Informational -Category Hygiene -Title "Partially disabled GPO: '$($gpo.Name)'" `
-                -Detail "Status: $($gpo.GpoStatus)." `
-                -Recommendation 'Confirm this is intentional.' -AffectedObject $gpo.Name
-        }
-        if ([string]::IsNullOrWhiteSpace($gpo.Description)) {
-            Add-Finding -Severity Informational -Category Hygiene -Title "GPO has no description: '$($gpo.Name)'" `
-                -Detail 'No description documenting purpose, owner, or review date.' `
-                -Recommendation "Add a description to GPO '$($gpo.Name)'." -AffectedObject $gpo.Name
-        }
-        $age = ($now - $gpo.Modified).Days
-        if ($age -ge $StaleGPODays) {
-            Add-Finding -Severity Low -Category Hygiene -Title "Stale GPO - $age days old - '$($gpo.Name)'" `
-                -Detail "Last modified: $($gpo.Modified)." `
-                -Recommendation 'Review; if no longer required, unlink and delete.' -AffectedObject $gpo.Name
-        }
-        if ($age -le 7) {
-            Add-Finding -Severity Informational -Category RecentChanges -Title "Recently modified - $age days: '$($gpo.Name)'" `
-                -Detail "Modified: $($gpo.Modified)." `
-                -Recommendation 'Verify the change was authorised and documented.' -AffectedObject $gpo.Name
-        }
-    }
-    Write-Log "  Findings analysis complete. Total: $($script:Findings.Count)." -Level SUCCESS
-}
-
-#endregion
-
-#region ── HTML REPORT GENERATION ─────────────────────────────────────────────
-
-function New-HTMLReport {
+function Invoke-RsopCollection {
+    <#
+    .SYNOPSIS
+        Get-GPResultantSetOfPolicy XML/HTML reports (module-based RSOP), which can
+        differ from gpresult and is worth capturing separately.
+    #>
+    [CmdletBinding()]
     param(
-        [pscustomobject]$EnvInfo,   [pscustomobject]$Connectivity,
-        [pscustomobject]$ComputerInfo, [pscustomobject]$RSOPData,
-        [pscustomobject[]]$GPOInventory, [pscustomobject[]]$AllLinks,
-        [pscustomobject[]]$AllPerms,     [pscustomobject[]]$WMIFilters,
-        [pscustomobject]$SysvolResult,   [string]$ReportFile
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter()][string]$User
     )
-    Write-Log 'Generating master HTML report' -Level SECTION
-    $script:SectionSeq = 0
-
-    $css = @'
-*{box-sizing:border-box;margin:0;padding:0}body{font-family:"Segoe UI",Arial,sans-serif;background:#edf2f7;color:#2d3748;font-size:14px}a{color:#3182ce;text-decoration:none}a:hover{text-decoration:underline}.hdr{background:linear-gradient(135deg,#1a365d,#2c5282);color:#fff;padding:20px 32px}.hdr h1{font-size:20px;font-weight:700}.hdr .meta{font-size:12px;margin-top:5px;opacity:.85}.nav{background:#2a4a7f;padding:0 32px;display:flex;flex-wrap:wrap}.nav a{color:#bee3f8;padding:9px 14px;display:inline-block;font-size:12px;border-bottom:3px solid transparent;white-space:nowrap}.nav a:hover{color:#fff;border-bottom-color:#63b3ed;text-decoration:none}.wrap{max-width:1440px;margin:20px auto;padding:0 20px 60px}.section{background:#fff;border-radius:6px;margin-bottom:18px;box-shadow:0 1px 3px rgba(0,0,0,.1);overflow:hidden}.section-hdr{background:#ebf8ff;border-bottom:1px solid #bee3f8;padding:12px 18px;cursor:pointer;display:flex;justify-content:space-between;align-items:center;user-select:none}.sec-title{font-size:14px;font-weight:600;color:#2b6cb0}.toggle-btn{font-size:12px;color:#4a90d9;font-weight:700;min-width:24px;text-align:right}.section-body{padding:18px}table{width:100%;border-collapse:collapse;font-size:12px}thead th{background:#2c5282;color:#fff;padding:8px 10px;text-align:left;font-weight:600;white-space:nowrap}tbody tr:nth-child(even){background:#f7fafc}tbody tr:hover{background:#ebf8ff}td{padding:6px 10px;border-bottom:1px solid #e2e8f0;vertical-align:top;word-break:break-word;max-width:420px}.badge{display:inline-block;padding:2px 9px;border-radius:10px;font-size:11px;font-weight:700;white-space:nowrap}.bc{background:#fff5f5;color:#c53030;border:1px solid #fc8181}.bh{background:#fffaf0;color:#c05621;border:1px solid #f6ad55}.bm{background:#fffff0;color:#975a16;border:1px solid #f6e05e}.bl{background:#f0fff4;color:#276749;border:1px solid #68d391}.bi{background:#f0f4f8;color:#4a5568;border:1px solid #cbd5e0}.stat-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(130px,1fr));gap:12px;margin-bottom:16px}.stat-card{background:#f7fafc;border:1px solid #e2e8f0;border-radius:6px;padding:12px;text-align:center}.stat-card .num{font-size:26px;font-weight:700;color:#2b6cb0}.stat-card .lbl{font-size:11px;color:#718096;margin-top:3px}.sok{color:#276749;font-weight:600}.sfail{color:#c53030;font-weight:600}.no-data{color:#a0aec0;font-style:italic;padding:8px 0}.sumbox{border:1px solid #e2e8f0;border-radius:5px;padding:10px 14px;background:#f7fafc}
-'@
-
-    $js = 'function toggleSec(id){var b=document.getElementById("body_"+id),t=document.getElementById("toggle_"+id);if(b.style.display==="none"){b.style.display="";t.textContent="[-]";}else{b.style.display="none";t.textContent="[+]";}}'
-
-    $crit=$($script:Findings|Where-Object Severity -eq 'Critical').Count
-    $high=$($script:Findings|Where-Object Severity -eq 'High').Count
-    $med =$($script:Findings|Where-Object Severity -eq 'Medium').Count
-    $low =$($script:Findings|Where-Object Severity -eq 'Low').Count
-    $info=$($script:Findings|Where-Object Severity -eq 'Informational').Count
-    $gCnt = if ($GPOInventory) { $GPOInventory.Count } else { 'N/A' }
-    $lCnt = if ($AllLinks)     { $AllLinks.Count }     else { 'N/A' }
-
-    $summaryHtml = @"
-<div class="stat-grid">
-  <div class="stat-card"><div class="num">$gCnt</div><div class="lbl">Total GPOs</div></div>
-  <div class="stat-card"><div class="num">$lCnt</div><div class="lbl">Total Links</div></div>
-  <div class="stat-card"><div class="num" style="color:#c53030">$crit</div><div class="lbl">Critical</div></div>
-  <div class="stat-card"><div class="num" style="color:#c05621">$high</div><div class="lbl">High</div></div>
-  <div class="stat-card"><div class="num" style="color:#975a16">$med</div><div class="lbl">Medium</div></div>
-  <div class="stat-card"><div class="num" style="color:#276749">$low</div><div class="lbl">Low</div></div>
-  <div class="stat-card"><div class="num" style="color:#4a5568">$info</div><div class="lbl">Info</div></div>
-</div>
-<div class="sumbox">
-  <b>Target:</b> $(ConvertTo-HtmlEncoded $EnvInfo.AuditTarget) &nbsp;|&nbsp;
-  <b>Domain:</b> $(ConvertTo-HtmlEncoded $EnvInfo.Domain) &nbsp;|&nbsp;
-  <b>DC:</b> $(ConvertTo-HtmlEncoded $EnvInfo.DomainController) &nbsp;|&nbsp;
-  <b>Operator:</b> $(ConvertTo-HtmlEncoded $EnvInfo.CurrentUser) &nbsp;|&nbsp;
-  <b>Date:</b> $($script:StartTime.ToString('yyyy-MM-dd HH:mm:ss'))
-</div>
-"@
-
-    $envRows = @(
-        [pscustomobject]@{Property='Computer';         Value=$EnvInfo.ComputerName}
-        [pscustomobject]@{Property='FQDN';             Value=$EnvInfo.FQDN}
-        [pscustomobject]@{Property='Domain';           Value=$EnvInfo.Domain}
-        [pscustomobject]@{Property='Domain Controller';Value=$EnvInfo.DomainController}
-        [pscustomobject]@{Property='AD Site';          Value=$EnvInfo.ADSite}
-        [pscustomobject]@{Property='OS';               Value=$EnvInfo.OSCaption}
-        [pscustomobject]@{Property='OS Build';         Value=$EnvInfo.OSBuild}
-        [pscustomobject]@{Property='PowerShell';       Value="$($EnvInfo.PSVersion) [$($EnvInfo.PSEdition)]"}
-        [pscustomobject]@{Property='Running As';       Value=$EnvInfo.CurrentUser}
-        [pscustomobject]@{Property='Admin';            Value=$EnvInfo.IsAdmin}
-        [pscustomobject]@{Property='Domain Joined';    Value=$EnvInfo.IsDomainJoined}
-        [pscustomobject]@{Property='GP Module';        Value=$script:GPModuleLoaded}
-        [pscustomobject]@{Property='AD Module';        Value=$script:ADModuleLoaded}
-    )
-    $envHtml = New-HtmlTable -Data $envRows -Properties @('Property','Value')
-
-    $connHtml = if ($Connectivity) {
-        $sb2 = [System.Text.StringBuilder]::new()
-        [void]$sb2.Append('<table><thead><tr><th>Check</th><th>Result</th></tr></thead><tbody>')
-        foreach ($kv in $Connectivity.PSObject.Properties) {
-            $cls = if ($kv.Value -eq 'OK') { 'sok' } else { 'sfail' }
-            [void]$sb2.Append("<tr><td>$(ConvertTo-HtmlEncoded $kv.Name)</td><td class='$cls'>$(ConvertTo-HtmlEncoded $kv.Value)</td></tr>")
-        }
-        [void]$sb2.Append('</tbody></table>')
-        $sb2.ToString()
-    } else { '<p class="no-data">Connectivity check not run.</p>' }
-
-    $compAppliedHtml = if ($RSOPData -and $RSOPData.ComputerApplied.Count -gt 0) { New-HtmlTable $RSOPData.ComputerApplied @('Order','Name','Id') } else { '<p class="no-data">No computer-scope applied GPOs recorded.</p>' }
-    $compDeniedHtml  = if ($RSOPData -and $RSOPData.ComputerDenied.Count  -gt 0) { New-HtmlTable $RSOPData.ComputerDenied  @('Name','Reason','Id') } else { '<p class="no-data">No computer-scope denied GPOs recorded.</p>' }
-    $userAppliedHtml = if ($RSOPData -and $RSOPData.UserApplied.Count     -gt 0) { New-HtmlTable $RSOPData.UserApplied     @('Order','Name','Id') } else { '<p class="no-data">No user-scope applied GPOs recorded.</p>' }
-    $userDeniedHtml  = if ($RSOPData -and $RSOPData.UserDenied.Count      -gt 0) { New-HtmlTable $RSOPData.UserDenied      @('Name','Reason','Id') } else { '<p class="no-data">No user-scope denied GPOs recorded.</p>' }
-
-    $gpoInvHtml = if ($GPOInventory -and $GPOInventory.Count -gt 0) {
-        New-HtmlTable $GPOInventory @('Name','GpoStatus','LinkCount','UserVersion','ComputerVersion','WmiFilter','HasCPassword','IsEmpty','Modified','Owner')
-    } else { '<p class="no-data">Domain inventory not collected. Use -IncludeDomainInventory.</p>' }
-
-    $linksHtml = if ($AllLinks -and $AllLinks.Count -gt 0) {
-        $disp = if ($AllLinks.Count -gt 500) { $AllLinks[0..499] } else { $AllLinks }
-        (New-HtmlTable $disp @('GPOName','Target','TargetType','LinkOrder','LinkEnabled','Enforced','BlockInheritance')) +
-            $(if ($AllLinks.Count -gt 500) { "<p style='color:#718096;font-size:12px'>Showing 500 of $($AllLinks.Count)</p>" } else { '' })
-    } else { '<p class="no-data">Link inventory not collected.</p>' }
-
-    $permsHtml = if ($AllPerms -and $AllPerms.Count -gt 0) {
-        $disp = if ($AllPerms.Count -gt 1000) { $AllPerms[0..999] } else { $AllPerms }
-        (New-HtmlTable $disp @('GPOName','Trustee','TrusteeType','Permission','Denied')) +
-            $(if ($AllPerms.Count -gt 1000) { "<p style='color:#718096;font-size:12px'>Showing 1000 of $($AllPerms.Count)</p>" } else { '' })
-    } else { '<p class="no-data">Permissions audit not collected. Use -IncludeSecurityAudit.</p>' }
-
-    $wmiHtml = if ($WMIFilters -and $WMIFilters.Count -gt 0) {
-        New-HtmlTable $WMIFilters @('Name','Namespace','Query','IsWin32Product','BroadOrExpensive','Author','Modified')
-    } else { '<p class="no-data">No WMI filters found.</p>' }
-
-    $sysvolHtml = if ($SysvolResult) { @"
-<table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>
-<tr><td>SYSVOL Accessible</td><td class="sok">Yes</td></tr>
-<tr><td>AD GPO Count</td><td>$($SysvolResult.ADGPOCount)</td></tr>
-<tr><td>SYSVOL GPO Count</td><td>$($SysvolResult.SYSVOLGPOCount)</td></tr>
-<tr><td>Only in SYSVOL (orphaned)</td><td>$($SysvolResult.OnlyInSYSVOL.Count)</td></tr>
-<tr><td>Only in AD (missing SYSVOL)</td><td>$($SysvolResult.OnlyInAD.Count)</td></tr>
-<tr><td>GPT.INI Version Mismatches</td><td>$($SysvolResult.VersionMismatches.Count)</td></tr>
-</tbody></table>
-"@ } else { '<p class="no-data">SYSVOL check not performed or SYSVOL not accessible.</p>' }
-
-    # Findings table with raw badge HTML
-    $sevOrder = @{Critical=1;High=2;Medium=3;Low=4;Informational=5}
-    $sorted   = $script:Findings | Sort-Object { $sevOrder[$_.Severity] }
-    $fSb = [System.Text.StringBuilder]::new()
-    if ($sorted.Count -gt 0) {
-        [void]$fSb.Append('<table><thead><tr><th>Sev</th><th>Cat</th><th>Title</th><th>Object</th><th>Detail</th><th>Action</th></tr></thead><tbody>')
-        foreach ($f in $sorted) {
-            $bc = switch ($f.Severity) { 'Critical'{'bc'} 'High'{'bh'} 'Medium'{'bm'} 'Low'{'bl'} default{'bi'} }
-            [void]$fSb.Append("<tr><td><span class='badge $bc'>$(ConvertTo-HtmlEncoded $f.Severity)</span></td>")
-            [void]$fSb.Append("<td>$(ConvertTo-HtmlEncoded $f.Category)</td>")
-            [void]$fSb.Append("<td>$(ConvertTo-HtmlEncoded $f.Title)</td>")
-            [void]$fSb.Append("<td>$(ConvertTo-HtmlEncoded $f.AffectedObject)</td>")
-            [void]$fSb.Append("<td>$(ConvertTo-HtmlEncoded $f.Detail)</td>")
-            [void]$fSb.Append("<td>$(ConvertTo-HtmlEncoded $f.Recommendation)</td></tr>")
-        }
-        [void]$fSb.Append('</tbody></table>')
-    } else { [void]$fSb.Append('<p class="no-data">No findings generated.</p>') }
-    $findingsHtml = $fSb.ToString()
-
-    $critHigh  = @($sorted | Where-Object { $_.Severity -in 'Critical','High' })
-    $remLines  = $critHigh | ForEach-Object { "<li><strong>[$(ConvertTo-HtmlEncoded $_.Severity)] $(ConvertTo-HtmlEncoded $_.Title)</strong><br>$(ConvertTo-HtmlEncoded $_.Recommendation)</li>" }
-    $remHtml   = if ($remLines.Count -gt 0) { "<ol style='padding-left:20px;line-height:1.9'>$($remLines -join '')</ol>" }
-                 else { '<p class="no-data">No critical or high findings to remediate.</p>' }
-
-    $gpoReportHtml = if ($GPOInventory -and $GPOInventory.Count -gt 0) {
-        $lSb = [System.Text.StringBuilder]::new()
-        [void]$lSb.Append('<table><thead><tr><th>GPO Name</th><th>Status</th><th>Links</th><th>HTML</th><th>XML</th></tr></thead><tbody>')
-        foreach ($g in $GPOInventory) {
-            $sf = Get-SafeFileName $g.Name
-            $hExists = Test-Path $g.HtmlReportPath -EA SilentlyContinue
-            $xExists = Test-Path $g.XmlReportPath  -EA SilentlyContinue
-            $hLnk = if ($hExists) { "<a href='..\DomainGPOs\HTML\$sf.html' target='_blank'>HTML</a>" } else { 'N/A' }
-            $xLnk = if ($xExists) { "<a href='..\DomainGPOs\XML\$sf.xml'  target='_blank'>XML</a>"  } else { 'N/A' }
-            [void]$lSb.Append("<tr><td>$(ConvertTo-HtmlEncoded $g.Name)</td><td>$(ConvertTo-HtmlEncoded $g.GpoStatus)</td><td>$($g.LinkCount)</td><td>$hLnk</td><td>$xLnk</td></tr>")
-        }
-        [void]$lSb.Append('</tbody></table>')
-        $lSb.ToString()
-    } else { '<p class="no-data">No individual GPO reports generated.</p>' }
-
-    $secs  = @()
-    $secs += New-HtmlSection 'Executive Summary'         $summaryHtml
-    $secs += New-HtmlSection 'Environment'               $envHtml
-    $secs += New-HtmlSection 'Connectivity'              $connHtml
-    $secs += New-HtmlSection 'Computer Applied GPOs'     $compAppliedHtml
-    $secs += New-HtmlSection 'Computer Denied GPOs'      $compDeniedHtml
-    $secs += New-HtmlSection 'User Applied GPOs'         $userAppliedHtml   -Collapsed
-    $secs += New-HtmlSection 'User Denied GPOs'          $userDeniedHtml    -Collapsed
-    $secs += New-HtmlSection 'Domain GPO Inventory'      $gpoInvHtml        -Collapsed
-    $secs += New-HtmlSection 'GPO Link Map'              $linksHtml         -Collapsed
-    $secs += New-HtmlSection 'Permissions / Delegation'  $permsHtml         -Collapsed
-    $secs += New-HtmlSection 'WMI Filters'               $wmiHtml           -Collapsed
-    $secs += New-HtmlSection 'SYSVOL Consistency'        $sysvolHtml
-    $secs += New-HtmlSection 'All Findings'              $findingsHtml
-    $secs += New-HtmlSection 'Remediation Priorities'    $remHtml
-    $secs += New-HtmlSection 'Individual GPO Reports'    $gpoReportHtml     -Collapsed
-
-    $html = @"
-<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>GPO Audit - $(ConvertTo-HtmlEncoded $EnvInfo.AuditTarget)</title>
-<style>$css</style></head>
-<body>
-<div class="hdr">
-  <h1>Group Policy Object Audit Report</h1>
-  <div class="meta">Target: <strong>$(ConvertTo-HtmlEncoded $EnvInfo.AuditTarget)</strong> &nbsp;|&nbsp; Domain: <strong>$(ConvertTo-HtmlEncoded $EnvInfo.Domain)</strong> &nbsp;|&nbsp; DC: <strong>$(ConvertTo-HtmlEncoded $EnvInfo.DomainController)</strong> &nbsp;|&nbsp; Generated: <strong>$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')</strong></div>
-</div>
-<div class="nav">
-  <a href="javascript:void(0)">Summary</a><a href="javascript:void(0)">Environment</a>
-  <a href="javascript:void(0)">Connectivity</a><a href="javascript:void(0)">Applied GPOs</a>
-  <a href="javascript:void(0)">All Findings</a><a href="javascript:void(0)">SYSVOL</a>
-  <a href="javascript:void(0)">Remediation</a>
-</div>
-<div class="wrap">
-$($secs -join "`n")
-</div>
-<script>$js</script>
-</body></html>
-"@
-
-    try {
-        $html | Out-File -FilePath $ReportFile -Encoding UTF8 -Force
-        Write-Log "Master HTML report: $ReportFile" -Level SUCCESS
-    } catch { Write-Log "Failed to save HTML report: $_" -Level ERROR }
-}
-
-#endregion
-
-#region ── EXPORT HELPERS ─────────────────────────────────────────────────────
-
-function Export-FindingsData {
-    param([string]$RootOutput)
-    $script:Findings | Export-Csv (Join-Path $RootOutput 'RawData\Findings.csv') -NoTypeInformation -Force
-    $script:Findings | ConvertTo-Json -Depth 4 | Out-File (Join-Path $RootOutput 'RawData\Findings.json') -Encoding UTF8 -Force
-
-    $sevOrder = @{Critical=1;High=2;Medium=3;Low=4;Informational=5}
-    $sorted   = $script:Findings | Sort-Object { $sevOrder[$_.Severity] }
-    $sb = [System.Text.StringBuilder]::new()
-    [void]$sb.AppendLine('GPO AUDIT FINDINGS REPORT')
-    [void]$sb.AppendLine("Generated : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
-    [void]$sb.AppendLine('=' * 78)
-    foreach ($sev in @('Critical','High','Medium','Low','Informational')) {
-        $g = @($sorted | Where-Object Severity -eq $sev)
-        if ($g.Count -eq 0) { continue }
-        [void]$sb.AppendLine("`n[$sev] — $($g.Count) finding(s)")
-        [void]$sb.AppendLine('-' * 60)
-        foreach ($f in $g) {
-            [void]$sb.AppendLine("  Object : $($f.AffectedObject)")
-            [void]$sb.AppendLine("  Title  : $($f.Title)")
-            [void]$sb.AppendLine("  Detail : $($f.Detail)")
-            [void]$sb.AppendLine("  Action : $($f.Recommendation)")
-            [void]$sb.AppendLine()
-        }
-    }
-    $sb.ToString() | Out-File (Join-Path $RootOutput 'Summary\Findings_Summary.txt') -Encoding UTF8 -Force
-    Write-Log 'Findings exported: CSV, JSON, TXT.' -Level SUCCESS
-}
-
-function Export-ExecutionLog {
-    param([string]$LogDir)
-    $script:LogLines | Out-File (Join-Path $LogDir 'Audit_Execution.log') -Encoding UTF8 -Force
-}
-
-#endregion
-
-#region ── MAIN EXECUTION ─────────────────────────────────────────────────────
-
-function Main {
-    Write-Host ''
-    Write-Host '  GPO-Audit v1.0.0  -  Starting' -ForegroundColor Cyan
-    Write-Host '  ─────────────────────────────────────────────────────────────' -ForegroundColor Cyan
-
-    # 1. Admin check / auto-elevate
-    if (-not (Test-IsAdmin)) {
-        Request-AdministratorElevation
+    if (-not (Get-Command Get-GPResultantSetOfPolicy -ErrorAction SilentlyContinue)) {
+        Add-UnavailableItem -Area 'Get-GPResultantSetOfPolicy' -Reason 'Cmdlet not available (GroupPolicy module missing or compatibility-layer limitation).'
         return
     }
-    Write-Log 'Administrator privileges confirmed.' -Level SUCCESS
-
-    # 2. Environment
-    $envInfo = Get-EnvironmentInfo
-    $osInfo  = Get-OSInfo
-
-    if (-not $envInfo.IsDomainJoined) {
-        Write-Log 'Machine is NOT domain-joined. Domain features unavailable.' -Level WARN
-        Add-Finding -Severity High -Category Prerequisites -Title 'Machine is not domain-joined' `
-            -Detail 'GPO inventory, RSOP, and SYSVOL checks require domain membership.' `
-            -Recommendation 'Run from a domain-joined machine.'
-    }
-
-    # 3. Output directory
-    New-OutputDirectory -EnvInfo $envInfo
-
-    # 4. RSAT check / install
-    Write-Log 'Checking RSAT prerequisites' -Level SECTION
-    $rsatStatus = Test-RSATAvailable -OSInfo $osInfo
-    Write-Log "  GroupPolicy RSAT     : $(if ($rsatStatus.GroupPolicyRSAT) {'Installed'} else {'MISSING'})"
-    Write-Log "  ActiveDirectory RSAT : $(if ($rsatStatus.ActiveDirectoryRSAT) {'Installed'} else {'MISSING'})"
-
-    if (-not $rsatStatus.GroupPolicyRSAT -or -not $rsatStatus.ActiveDirectoryRSAT) {
-        if ($InstallPrerequisites) {
-            Install-RSATComponents -OSInfo $osInfo
-        } elseif ($PSCmdlet.ShouldProcess('Missing RSAT components', 'Install')) {
-            Install-RSATComponents -OSInfo $osInfo
-        } else {
-            Write-Log 'RSAT installation skipped.' -Level WARN
-            Add-Finding -Severity Medium -Category Prerequisites `
-                -Title  'RSAT components missing' `
-                -Detail "GroupPolicyRSAT=$($rsatStatus.GroupPolicyRSAT) | ActiveDirectoryRSAT=$($rsatStatus.ActiveDirectoryRSAT)" `
-                -Recommendation 'Run with -InstallPrerequisites to install automatically.'
+    $firstReport = $true
+    foreach ($type in @('Xml', 'Html')) {
+        $path = Join-Path $script:Paths.RSOP ("RSOP-GPMC.{0}" -f $type.ToLower())
+        $params = @{ ReportType = $type; Path = $path; ErrorAction = 'Stop' }
+        if (-not $script:IsLocalTarget) { $params.Computer = $Target }
+        if ($User) { $params.User = $User }
+        # Back-to-back invocations race the teardown of the previous call's
+        # temporary RSOP WMI namespace; losing the race surfaces as a raw
+        # NullReferenceException from the GPMC interop. Pause between report
+        # types and retry on that signature.
+        if (-not $firstReport) { Start-Sleep -Seconds 5 }
+        $firstReport = $false
+        $maxAttempts = 3
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            try {
+                $null = Get-GPResultantSetOfPolicy @params
+                $note = $(if ($attempt -gt 1) { " (attempt $attempt)" } else { '' })
+                Write-AuditLog -Level Success -Message "Get-GPResultantSetOfPolicy ($type) collected$note"
+                break
+            }
+            catch {
+                $msg = $_.Exception.Message
+                $transient = ($msg -match 'Object reference not set|0x80041001|provider failure')
+                if ($transient -and $attempt -lt $maxAttempts) {
+                    Write-AuditLog -Level Warn -Message "Get-GPResultantSetOfPolicy ($type) attempt ${attempt}: transient RSOP provider error; retrying in 5s..."
+                    Start-Sleep -Seconds 5
+                    continue
+                }
+                # Terminal causes: user never logged on, RSOP WMI namespace access denied, target offline.
+                Write-AuditLog -Level Error -Message "Get-GPResultantSetOfPolicy ($type) failed: $msg"
+                Add-UnavailableItem -Area "Get-GPResultantSetOfPolicy ($type)" -Reason $msg
+                break
+            }
         }
-    }
-
-    # 5. Modules
-    Import-RequiredModules
-
-    # 6. Connectivity
-    $connectivity = Test-DomainConnectivity -DC $script:DC -DomainName $Domain
-
-    # 7. Computer info
-    $computerInfo = Get-ComputerADInfo -Target $ComputerName -DomainName $Domain
-    $computerInfo | ConvertTo-Json -Depth 3 |
-        Out-File (Join-Path $script:RootOutput 'Computer\ComputerInfo.json') -Encoding UTF8 -Force
-
-    # 8. RSOP
-    $rsopData = $null
-    if (-not $SkipRemoteRSOP) {
-        $proceed = $true
-        if ($script:IsRemote) { $proceed = Test-RemoteTarget -Target $ComputerName }
-        if ($proceed) {
-            $rsopData = Invoke-GPResultCollection -Target $ComputerName -UserParam $UserName `
-                -OutDir (Join-Path $script:RootOutput 'RSOP')
-        }
-    } else { Write-Log 'RSOP collection skipped (-SkipRemoteRSOP).' }
-
-    # 9. Event logs
-    $events = @()
-    if ($IncludeEventLogs) {
-        $events = Get-GPEventLog -Target $ComputerName -OutDir (Join-Path $script:RootOutput 'EventLogs')
-    }
-
-    # 10. Domain inventory
-    $gpoInventory = @(); $allLinks = @(); $allPerms = @(); $wmiFilters = @(); $sysvolResult = $null
-
-    if ($IncludeDomainInventory) {
-        $gpoInventory = Get-DomainGPOInventory -DomainName $Domain `
-            -DomainGPODir (Join-Path $script:RootOutput 'DomainGPOs') `
-            -RawDataDir   (Join-Path $script:RootOutput 'RawData')
-
-        $allLinks = Get-GPOLinkInventory -DomainName $Domain `
-            -RawDataDir (Join-Path $script:RootOutput 'RawData')
-
-        if ($IncludeSecurityAudit -and $gpoInventory.Count -gt 0) {
-            $allPerms = Get-GPOPermissionsAudit -GPOInventory $gpoInventory `
-                -RawDataDir (Join-Path $script:RootOutput 'RawData')
-        }
-
-        $wmiFilters = Get-WMIFilterAudit -GPOInventory $gpoInventory -DomainName $Domain `
-            -RawDataDir (Join-Path $script:RootOutput 'RawData')
-
-        $sysvolResult = Test-SYSVOLConsistency -DomainName $Domain -GPOInventory $gpoInventory `
-            -RawDataDir (Join-Path $script:RootOutput 'RawData')
-    }
-
-    # 11. Findings analysis
-    if ($gpoInventory.Count -gt 0) {
-        Invoke-FindingsAnalysis -GPOInventory $gpoInventory -AllLinks $allLinks
-    }
-
-    # 12. HTML report
-    New-HTMLReport `
-        -EnvInfo $envInfo -Connectivity $connectivity -ComputerInfo $computerInfo `
-        -RSOPData $rsopData -GPOInventory $gpoInventory -AllLinks $allLinks `
-        -AllPerms $allPerms -WMIFilters $wmiFilters -SysvolResult $sysvolResult `
-        -ReportFile $script:ReportPath
-
-    # 13. Exports
-    Export-FindingsData -RootOutput $script:RootOutput
-    Export-ExecutionLog -LogDir     (Join-Path $script:RootOutput 'Logs')
-
-    # 14. Transcript
-    try { Stop-Transcript -EA SilentlyContinue } catch {}
-
-    # 15. Summary
-    $elapsed = (Get-Date) - $script:StartTime
-    $cF = @($script:Findings | Where-Object Severity -eq 'Critical').Count
-    $hF = @($script:Findings | Where-Object Severity -eq 'High').Count
-    $mF = @($script:Findings | Where-Object Severity -eq 'Medium').Count
-    $lF = @($script:Findings | Where-Object Severity -eq 'Low').Count
-    Write-Host ''
-    Write-Host '  GPO-Audit Complete' -ForegroundColor Cyan
-    Write-Host '  ─────────────────────────────────────────────────────────────' -ForegroundColor Cyan
-    Write-Host "  Duration  : $($elapsed.ToString('mm\:ss'))"
-    Write-Host "  Findings  : Critical=$cF  High=$hF  Medium=$mF  Low=$lF"
-    Write-Host "  Output    : $script:RootOutput"
-    Write-Host "  Report    : $script:ReportPath"
-    Write-Host ''
-
-    if ($OpenReport -and (Test-Path $script:ReportPath -EA SilentlyContinue)) {
-        Start-Process $script:ReportPath
     }
 }
 
-Main
+function Get-GroupPolicyEventLogData {
+    <#
+    .SYNOPSIS
+        Collects Microsoft-Windows-GroupPolicy/Operational events, classifies
+        them, exports CSV (+EVTX where practical), and raises findings.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Target,
+        [Parameter(Mandatory)][int]$Days
+    )
+    $logName = 'Microsoft-Windows-GroupPolicy/Operational'
+    $since   = (Get-Date).AddDays(-1 * $Days)
+    $events  = $null
 
-#endregion
+    try {
+        $filter = @{ LogName = $logName; StartTime = $since }
+        $params = @{ FilterHashtable = $filter; ErrorAction = 'Stop'; MaxEvents = 5000 }
+        if (-not $script:IsLocalTarget) {
+            $params.ComputerName = $Target
+            if ($script:HasCredential) { $params.Credential = $Credential }
+        }
+        $events = Get-WinEvent @params
+    }
+    catch [Exception] {
+        if ($_.Exception.Message -match 'No events were found') {
+            Write-AuditLog -Level Info -Message "No Group Policy operational events in the last $Days days."
+            $events = @()
+        }
+        else {
+            Add-UnavailableItem -Area 'GroupPolicy operational event log' -Reason $_.Exception.Message
+            return
+        }
+    }
 
+    # Event ID classification for the Microsoft-Windows-GroupPolicy provider:
+    #   4000-4299 start of processing      5000-5299 success details
+    #   5312 applied GPO list              5313 denied/filtered GPO list
+    #   5314 loopback mode                 5320-5321 filtering detail
+    #   6000-6299 warnings                 7000-7299 errors during processing
+    #   8000-8007 processing completed (property 0 = elapsed seconds)
+    #   1058/1030/1096 SYSVOL access       1054/1055 DC/network discovery
+    $classify = {
+        param($id, $level)
+        if ($level -eq 2) { return 'Error' }
+        if ($level -eq 3) { return 'Warning' }
+        switch ($id) {
+            { $_ -in 1054, 1055, 5308, 5326 } { 'DC/Network discovery'; break }
+            { $_ -in 1058, 1030, 1096 }       { 'SYSVOL access'; break }
+            { $_ -in 5312 }                   { 'Applied GPO list'; break }
+            { $_ -in 5313 }                   { 'Denied GPO list (filtering)'; break }
+            { $_ -in 5314 }                   { 'Loopback'; break }
+            { $_ -in 5320, 5321 }             { 'Security/WMI filtering'; break }
+            { $_ -ge 4000 -and $_ -lt 4300 }  { 'Processing start'; break }
+            { $_ -ge 5016 -and $_ -le 5017 }  { 'Extension processing (CSE)'; break }
+            { $_ -ge 6000 -and $_ -lt 6300 }  { 'Warning'; break }
+            { $_ -ge 7000 -and $_ -lt 7300 }  { 'Processing error'; break }
+            { $_ -ge 8000 -and $_ -le 8007 }  { 'Processing completed'; break }
+            default                           { 'Other' }
+        }
+    }
 
+    $records = New-Object System.Collections.Generic.List[object]
+    $errorCount = 0
+    $slowCount  = 0
+    foreach ($ev in @($events)) {
+        $category = & $classify $ev.Id $ev.Level
+        $duration = $null
+        if ($ev.Id -ge 8000 -and $ev.Id -le 8007) {
+            try {
+                if ($ev.Properties.Count -gt 0) { $duration = [double]$ev.Properties[0].Value }
+            }
+            catch { }
+        }
+        elseif ($ev.Id -in 5016, 6016, 7016) {
+            try {
+                if ($ev.Properties.Count -gt 0) { $duration = [math]::Round(([double]$ev.Properties[0].Value) / 1000.0, 1) }
+            }
+            catch { }
+        }
+        if ($ev.Level -eq 2) { $errorCount++ }
+        if ($null -ne $duration -and $duration -gt 60) { $slowCount++ }
+        $records.Add([pscustomobject]@{
+                TimeCreated  = $ev.TimeCreated
+                Id           = $ev.Id
+                Level        = $ev.LevelDisplayName
+                Category     = $category
+                DurationSec  = $duration
+                ActivityId   = "$($ev.ActivityId)"
+                Message      = ($ev.Message -replace '\r?\n', ' | ')
+            })
+    }
+    Export-AuditDataset -Name 'GroupPolicyEvents' -Data $records.ToArray() -Folder $script:Paths.EventLogs
 
+    # EVTX export (local: wevtutil; remote: via WinRM + copy)
+    try {
+        $evtxPath = Join-Path $script:Paths.EventLogs 'GroupPolicy-Operational.evtx'
+        if ($script:IsLocalTarget) {
+            & "$env:SystemRoot\System32\wevtutil.exe" epl $logName $evtxPath /ow:true 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { Write-AuditLog -Level Success -Message 'EVTX export completed' }
+            else { throw "wevtutil exited with code $LASTEXITCODE" }
+        }
+        elseif ($script:WinRMAvailable) {
+            $icm = @{ ComputerName = $Target; ErrorAction = 'Stop' }
+            if ($script:HasCredential) { $icm.Credential = $Credential }
+            $session = New-PSSession @icm
+            try {
+                $remoteFile = Invoke-Command -Session $session -ScriptBlock {
+                    param($ln)
+                    $f = Join-Path $env:TEMP 'GPAudit-GPO-Operational.evtx'
+                    Remove-Item $f -ErrorAction SilentlyContinue
+                    & "$env:SystemRoot\System32\wevtutil.exe" epl $ln $f 2>&1 | Out-Null
+                    if (Test-Path $f) { $f } else { $null }
+                } -ArgumentList $logName
+                if ($remoteFile) {
+                    Copy-Item -FromSession $session -Path $remoteFile -Destination $evtxPath -ErrorAction Stop
+                    Invoke-Command -Session $session -ScriptBlock { param($f) Remove-Item $f -ErrorAction SilentlyContinue } -ArgumentList $remoteFile
+                    Write-AuditLog -Level Success -Message 'EVTX export copied from remote target'
+                }
+            }
+            finally { Remove-PSSession -Session $session -ErrorAction SilentlyContinue }
+        }
+        else {
+            Add-UnavailableItem -Area 'EVTX export' -Reason 'Requires local execution or WinRM.'
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'EVTX export' -Reason $_.Exception.Message
+    }
 
+    # Findings from event evidence
+    if ($errorCount -gt 0) {
+        Add-AuditFinding -Severity High -Category 'Processing' `
+            -Title "$errorCount Group Policy processing error event(s) in the last $Days days on $Target" `
+            -Detail 'See EventLogs\GroupPolicyEvents.csv (Level = Error). Errors 7000-7017 indicate failed processing; 1058/1030 indicate SYSVOL access failures; 1054/1055 indicate DC discovery problems.' `
+            -Recommendation 'Investigate the specific event messages; run "gpupdate /force" interactively and re-check, validate DNS/DC reachability and SYSVOL permissions.' `
+            -RelatedObject $Target
+    }
+    if ($slowCount -gt 0) {
+        Add-AuditFinding -Severity Medium -Category 'Performance' `
+            -Title "$slowCount slow Group Policy processing event(s) (>60s) on $Target" `
+            -Detail 'Long processing durations were reported by completion events (8000-8007) or CSE events (5016/7016).' `
+            -Recommendation 'Review which client-side extensions are slow (event 5016 per-CSE durations); common causes are unreachable file shares in preferences, WMI filters using Win32_Product, and folder redirection.' `
+            -RelatedObject $Target
+    }
+    if ($records.Count -ge 5000) {
+        Write-AuditLog -Level Warn -Message 'Event collection reached the 5000-event cap; older events were not analyzed (the EVTX export contains the full log).'
+    }
+    Write-AuditLog -Level Info -Message "Collected $($records.Count) events ($errorCount errors, $slowCount slow)."
+}
+
+# =============================================================================
+#  Domain-side collection: GPO inventory, links, permissions, WMI filters
+# =============================================================================
+
+function Get-DomainGpoInventory {
+    <#
+    .SYNOPSIS
+        Enumerates every GPO in the domain with full metadata, content analysis
+        from its XML report, and per-GPO HTML + XML report files.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $script:AllGpos = @(Get-GPO -All @script:GpParams -ErrorAction Stop)
+    }
+    catch {
+        Add-UnavailableItem -Area 'Domain GPO inventory' -Reason $_.Exception.Message
+        return @()
+    }
+    Write-AuditLog -Level Info -Message "Found $($script:AllGpos.Count) GPOs in the domain."
+
+    # GPP extension display names (used to detect preference content).
+    $gppNames = @('Drive Maps', 'Files', 'Folders', 'Ini Files', 'Shortcuts', 'Environment',
+        'Local Users and Groups', 'Devices', 'Network Options', 'Network Shares',
+        'Power Options', 'Regional Options', 'Start Menu', 'Internet Settings',
+        'Applications', 'Data Sources', 'Folder Options', 'Registry')
+
+    $inventory = New-Object System.Collections.Generic.List[object]
+    $i = 0
+    foreach ($gpo in $script:AllGpos) {
+        $i++
+        Write-Progress -Activity 'Domain GPO inventory' -Status $gpo.DisplayName -PercentComplete ([int](100 * $i / [math]::Max(1, $script:AllGpos.Count)))
+        $safeName = Get-SafeFileName -Name ('{0}_{1}' -f $gpo.DisplayName, $gpo.Id.ToString().Substring(0, 8))
+
+        # ---- Per-GPO XML + HTML reports ----
+        $reportXmlText = $null
+        foreach ($rt in @('Xml', 'Html')) {
+            try {
+                $ext = $rt.ToLower()
+                $reportPath = Join-Path $script:Paths.DomainGPOs ("{0}.{1}" -f $safeName, $ext)
+                $report = Get-GPOReport -Guid $gpo.Id -ReportType $rt @script:GpParams -ErrorAction Stop
+                Set-Content -Path $reportPath -Value $report -Encoding UTF8
+                if ($rt -eq 'Xml') { $reportXmlText = $report }
+            }
+            catch {
+                Add-UnavailableItem -Area "GPO report ($rt): $($gpo.DisplayName)" -Reason $_.Exception.Message
+            }
+        }
+
+        # ---- Content analysis from the XML report ----
+        $extNamesComputer = @()
+        $extNamesUser     = @()
+        $isEmpty          = $null
+        if ($reportXmlText) {
+            try {
+                $xml = [xml]$reportXmlText
+                $extNamesComputer = @($xml.SelectNodes("//*[local-name()='Computer']/*[local-name()='ExtensionData']/*[local-name()='Name']") | ForEach-Object { $_.InnerText })
+                $extNamesUser     = @($xml.SelectNodes("//*[local-name()='User']/*[local-name()='ExtensionData']/*[local-name()='Name']") | ForEach-Object { $_.InnerText })
+                $isEmpty          = (($extNamesComputer.Count + $extNamesUser.Count) -eq 0)
+            }
+            catch {
+                Write-AuditLog -Level Warn -Message "Could not parse XML report for $($gpo.DisplayName): $($_.Exception.Message)"
+            }
+        }
+        $allExtNames = @($extNamesComputer + $extNamesUser)
+        $hasPref = [bool](@($allExtNames | Where-Object { $_ -in $gppNames -and $_ -ne 'Registry' }).Count -gt 0)
+        # Preference "Registry" vs Administrative Templates "Registry" share a display
+        # name; detect GPP registry via its namespace marker in the raw XML.
+        if (-not $hasPref -and $reportXmlText -and $reportXmlText -match 'RegistrySettings\s+clsid=') { $hasPref = $true }
+
+        $wmiFilterName = ''
+        $wmiObj = Get-PropertySafe -InputObject $gpo -Name 'WmiFilter'
+        if ($wmiObj) { $wmiFilterName = "$(Get-PropertySafe -InputObject $wmiObj -Name 'Name')" }
+
+        $record = [pscustomobject]@{
+            DisplayName             = $gpo.DisplayName
+            Id                      = $gpo.Id
+            DomainName              = $gpo.DomainName
+            Owner                   = $gpo.Owner
+            Description             = $gpo.Description
+            CreationTime            = $gpo.CreationTime
+            ModificationTime        = $gpo.ModificationTime
+            UserDSVersion           = $gpo.User.DSVersion
+            UserSysvolVersion       = $gpo.User.SysvolVersion
+            ComputerDSVersion       = $gpo.Computer.DSVersion
+            ComputerSysvolVersion   = $gpo.Computer.SysvolVersion
+            GpoStatus               = "$($gpo.GpoStatus)"
+            UserSettingsEnabled     = $gpo.User.Enabled
+            ComputerSettingsEnabled = $gpo.Computer.Enabled
+            WmiFilter               = $wmiFilterName
+            IsFullyDisabled         = ("$($gpo.GpoStatus)" -eq 'AllSettingsDisabled')
+            IsHalfDisabled          = ("$($gpo.GpoStatus)" -in @('UserSettingsDisabled', 'ComputerSettingsDisabled'))
+            AppearsEmpty            = $isEmpty
+            IsLinked                = $null     # filled in by link inventory
+            ContainsPreferences     = $hasPref
+            ContainsScripts         = [bool]($allExtNames -contains 'Scripts')
+            ContainsScheduledTasks  = [bool]($allExtNames -contains 'Scheduled Tasks')
+            ContainsDriveMaps       = [bool]($allExtNames -contains 'Drive Maps')
+            ContainsRegistryPrefs   = [bool]($reportXmlText -and $reportXmlText -match 'RegistrySettings\s+clsid=')
+            ContainsPrinters        = [bool](($allExtNames -contains 'Printers') -or ($allExtNames -contains 'Deployed Printer Connections'))
+            ContainsSoftwareInstall = [bool]($allExtNames -contains 'Software Installation')
+            Extensions              = ($allExtNames | Select-Object -Unique) -join '; '
+            ReportFile              = "$safeName.html"
+            VersionMismatch         = (($gpo.User.DSVersion -ne $gpo.User.SysvolVersion) -or ($gpo.Computer.DSVersion -ne $gpo.Computer.SysvolVersion))
+        }
+        $inventory.Add($record)
+    }
+    Write-Progress -Activity 'Domain GPO inventory' -Completed
+    Export-AuditDataset -Name 'DomainGPOInventory' -Data $inventory.ToArray() -Folder $script:Paths.DomainGPOs
+    return $inventory.ToArray()
+}
+
+function ConvertFrom-GPLinkAttribute {
+    <#
+    .SYNOPSIS
+        Parses a raw gPLink attribute string into link records.
+        Flag bit 0 = link disabled, bit 1 = enforced.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowEmptyString()][AllowNull()][string]$GPLink,
+        [Parameter(Mandatory)][string]$TargetDN,
+        [Parameter(Mandatory)][string]$TargetType,
+        [Parameter()][string]$CanonicalName = '',
+        [Parameter()][bool]$BlockInheritance = $false
+    )
+    $links = @()
+    if ([string]::IsNullOrWhiteSpace($GPLink)) { return $links }
+    $rx = [regex]'\[LDAP://[cC][nN]=\{(?<guid>[0-9a-fA-F\-]+)\}[^;]*;(?<flags>\d+)\]'
+    $matchList = $rx.Matches($GPLink)
+    $order = 0
+    foreach ($m in $matchList) {
+        # gPLink stores links left-to-right in GPMC display order (link order 1 first).
+        $order++
+        $flags = [int]$m.Groups['flags'].Value
+        $links += [pscustomobject]@{
+            GpoGuid          = [guid]$m.Groups['guid'].Value
+            TargetDN         = $TargetDN
+            TargetType       = $TargetType
+            CanonicalName    = $CanonicalName
+            LinkOrder        = $order
+            Enabled          = (($flags -band 1) -eq 0)
+            Enforced         = (($flags -band 2) -ne 0)
+            BlockInheritance = $BlockInheritance
+        }
+    }
+    return $links
+}
+
+function Get-GpoLinkInventory {
+    <#
+    .SYNOPSIS
+        Enumerates GPO links at site, domain, and OU level (raw gPLink parse),
+        plus Get-GPInheritance effective inheritance for the domain and each OU.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $allLinks    = New-Object System.Collections.Generic.List[object]
+    $inheritance = New-Object System.Collections.Generic.List[object]
+
+    # GUID -> display name map for link resolution
+    $gpoByGuid = @{}
+    foreach ($g in $script:AllGpos) { $gpoByGuid[$g.Id.ToString().ToLower()] = $g }
+
+    $resolveName = {
+        param($guid)
+        $key = $guid.ToString().ToLower()
+        if ($gpoByGuid.ContainsKey($key)) { return $gpoByGuid[$key].DisplayName }
+        try {
+            $g = Get-GPO -Guid $guid @script:GpParams -ErrorAction Stop
+            $gpoByGuid[$key] = $g
+            return $g.DisplayName
+        }
+        catch { return "<missing GPO $guid>" }
+    }
+
+    # ---- Domain root + all OUs ----
+    $containers = @()
+    try {
+        $domObj = Get-ADObject -Identity $script:DomainDN -Properties gPLink, gPOptions @script:AdParams -ErrorAction Stop
+        $containers += [pscustomobject]@{ Obj = $domObj; Type = 'Domain'; Canonical = $script:DomainInfo.DNSRoot }
+    }
+    catch {
+        Add-UnavailableItem -Area 'Domain root gPLink' -Reason $_.Exception.Message
+    }
+    try {
+        $ous = @(Get-ADOrganizationalUnit -Filter * -Properties gPLink, gPOptions, CanonicalName @script:AdParams -ErrorAction Stop)
+        Write-AuditLog -Level Info -Message "Enumerated $($ous.Count) organizational units."
+        foreach ($ou in $ous) {
+            $containers += [pscustomobject]@{ Obj = $ou; Type = 'OU'; Canonical = $ou.CanonicalName }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'OU enumeration' -Reason $_.Exception.Message
+    }
+    # ---- Sites (Configuration NC) ----
+    try {
+        $sites = @(Get-ADObject -LDAPFilter '(objectClass=site)' -SearchBase "CN=Sites,$($script:ConfigNC)" `
+                -Properties gPLink, gPOptions, cn @script:AdParams -ErrorAction Stop)
+        foreach ($site in $sites) {
+            $containers += [pscustomobject]@{ Obj = $site; Type = 'Site'; Canonical = "Site: $($site.cn)" }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'Site link enumeration' -Reason $_.Exception.Message
+    }
+
+    foreach ($c in $containers) {
+        $gplink = Get-PropertySafe -InputObject $c.Obj -Name 'gPLink'
+        $gpopts = Get-PropertySafe -InputObject $c.Obj -Name 'gPOptions' -Default 0
+        $blocked = ([int]("0$gpopts") -band 1) -eq 1
+        if ($blocked) {
+            Add-AuditFinding -Severity Medium -Category 'Inheritance' `
+                -Title "Block Inheritance is enabled on $($c.Obj.DistinguishedName)" `
+                -Detail 'GPOs linked above this container do not apply unless Enforced.' `
+                -Recommendation 'Confirm Block Inheritance is intentional; it complicates troubleshooting and is often better replaced with security filtering.' `
+                -RelatedObject $c.Obj.DistinguishedName
+        }
+        $parsed = ConvertFrom-GPLinkAttribute -GPLink "$gplink" -TargetDN $c.Obj.DistinguishedName `
+            -TargetType $c.Type -CanonicalName "$($c.Canonical)" -BlockInheritance $blocked
+        foreach ($link in $parsed) {
+            $name = & $resolveName $link.GpoGuid
+            $rec = [pscustomobject]@{
+                GpoName          = $name
+                GpoGuid          = $link.GpoGuid
+                Target           = $link.TargetDN
+                TargetType       = $link.TargetType
+                CanonicalName    = $link.CanonicalName
+                LinkOrder        = $link.LinkOrder
+                Enabled          = $link.Enabled
+                Enforced         = $link.Enforced
+                BlockInheritance = $link.BlockInheritance
+            }
+            $allLinks.Add($rec)
+            $key = $link.GpoGuid.ToString().ToLower()
+            if (-not $script:GpoLinkIndex.ContainsKey($key)) { $script:GpoLinkIndex[$key] = New-Object System.Collections.Generic.List[object] }
+            $script:GpoLinkIndex[$key].Add($rec)
+            if ($name -like '<missing GPO*') {
+                Add-AuditFinding -Severity High -Category 'Links' `
+                    -Title "Link to a missing GPO on $($c.Obj.DistinguishedName)" `
+                    -Detail "gPLink references GPO {$($link.GpoGuid)} which no longer exists in the domain." `
+                    -Recommendation 'Remove the dead link with GPMC (right-click the link, Delete). This is a link cleanup only; no GPO exists to delete.' `
+                    -RelatedObject $c.Obj.DistinguishedName
+            }
+            if (-not $link.Enabled) {
+                Add-AuditFinding -Severity Low -Category 'Links' `
+                    -Title "Disabled link: '$name' on $($c.Canonical)" `
+                    -Detail 'The link exists but is disabled, so the GPO does not apply from this container.' `
+                    -Recommendation 'Remove the link if permanently unused, or document why it is kept disabled.' `
+                    -RelatedObject $name
+            }
+            if ($link.Enforced) {
+                Add-AuditFinding -Severity Informational -Category 'Links' `
+                    -Title "Enforced link: '$name' on $($c.Canonical)" `
+                    -Detail 'Enforced links override Block Inheritance and win same-precedence conflicts.' `
+                    -Recommendation 'Keep Enforced usage rare and documented.' `
+                    -RelatedObject $name
+            }
+        }
+        # ---- Effective inheritance via GPMC (OU + domain only; sites unsupported) ----
+        if ($c.Type -in @('Domain', 'OU') -and (Get-Command Get-GPInheritance -ErrorAction SilentlyContinue)) {
+            try {
+                $inh = Get-GPInheritance -Target $c.Obj.DistinguishedName @script:GpParams -ErrorAction Stop
+                foreach ($ilink in @($inh.InheritedGpoLinks)) {
+                    $inheritance.Add([pscustomobject]@{
+                            Container        = $c.Obj.DistinguishedName
+                            ContainerType    = $c.Type
+                            GpoName          = $ilink.DisplayName
+                            GpoGuid          = $ilink.GpoId
+                            EffectiveOrder   = $ilink.Order
+                            Enabled          = $ilink.Enabled
+                            Enforced         = $ilink.Enforced
+                            LinkedDirectly   = ($ilink.Target -eq $c.Obj.DistinguishedName)
+                            LinkSource       = $ilink.Target
+                            GpoDomainName    = $ilink.GpoDomainName
+                            BlockInheritance = $inh.GpoInheritanceBlocked
+                        })
+                }
+            }
+            catch {
+                Add-UnavailableItem -Area "Get-GPInheritance: $($c.Obj.DistinguishedName)" -Reason $_.Exception.Message
+            }
+        }
+    }
+
+    Export-AuditDataset -Name 'GPOLinks' -Data $allLinks.ToArray() -Folder $script:Paths.Links
+    Export-AuditDataset -Name 'GPOInheritance' -Data $inheritance.ToArray() -Folder $script:Paths.Links
+    return $allLinks.ToArray()
+}
+
+function Get-GpoPermissionAudit {
+    <#
+    .SYNOPSIS
+        Per-GPO security filtering / delegation audit via Get-GPPermission,
+        with findings per the audit rules. Read-only.
+    #>
+    [CmdletBinding()]
+    param()
+
+    if (-not (Get-Command Get-GPPermission -ErrorAction SilentlyContinue)) {
+        Add-UnavailableItem -Area 'GPO permission audit' -Reason 'Get-GPPermission unavailable.'
+        return
+    }
+    $broadGroups = @('Domain Users', 'Authenticated Users', 'Everyone', 'Users', 'Domain Computers')
+    $adminOwners = @('Domain Admins', 'Enterprise Admins', 'Administrators', 'SYSTEM')
+    $permRecords = New-Object System.Collections.Generic.List[object]
+
+    $i = 0
+    foreach ($gpo in $script:AllGpos) {
+        $i++
+        Write-Progress -Activity 'GPO permission audit' -Status $gpo.DisplayName -PercentComplete ([int](100 * $i / [math]::Max(1, $script:AllGpos.Count)))
+        $perms = $null
+        try {
+            $perms = @(Get-GPPermission -Guid $gpo.Id -All @script:GpParams -ErrorAction Stop)
+        }
+        catch {
+            Add-UnavailableItem -Area "Permissions: $($gpo.DisplayName)" -Reason $_.Exception.Message
+            continue
+        }
+        $applyTrustees = @()
+        $hasAuthUsersRead  = $false
+        $hasAuthUsersApply = $false
+        $hasDomCompApply   = $false
+        foreach ($p in $perms) {
+            $trusteeName = "$(Get-PropertySafe -InputObject $p.Trustee -Name 'Name')"
+            $trusteeSid  = "$(Get-PropertySafe -InputObject $p.Trustee -Name 'Sid')"
+            $trusteeType = "$(Get-PropertySafe -InputObject $p.Trustee -Name 'SidType')"
+            $permission  = "$($p.Permission)"
+            $unresolved  = ($trusteeType -eq 'Unknown' -or [string]::IsNullOrEmpty($trusteeName))
+            $permRecords.Add([pscustomobject]@{
+                    GpoName    = $gpo.DisplayName
+                    GpoGuid    = $gpo.Id
+                    Trustee    = $(if ($unresolved) { $trusteeSid } else { $trusteeName })
+                    TrusteeSid = $trusteeSid
+                    SidType    = $trusteeType
+                    Permission = $permission
+                    Inherited  = $p.Inherited
+                    Denied     = (Get-PropertySafe -InputObject $p -Name 'Denied' -Default $false)
+                    Unresolved = $unresolved
+                })
+            if ($unresolved) {
+                Add-AuditFinding -Severity Medium -Category 'Security' `
+                    -Title "Unresolved SID on GPO '$($gpo.DisplayName)'" `
+                    -Detail "Trustee $trusteeSid ($permission) cannot be resolved - usually a deleted user/group (orphaned trustee)." `
+                    -Recommendation 'Remove the orphaned ACE via GPMC Delegation tab after confirming the principal is really gone.' `
+                    -RelatedObject $gpo.DisplayName
+            }
+            switch -Regex ($permission) {
+                'GpoApply' {
+                    $applyTrustees += $trusteeName
+                    if ($trusteeName -eq 'Authenticated Users') { $hasAuthUsersApply = $true; $hasAuthUsersRead = $true }
+                    if ($trusteeName -like '*Domain Computers')  { $hasDomCompApply = $true }
+                    if ($trusteeName -in @('Everyone'))          {
+                        Add-AuditFinding -Severity High -Category 'Security' `
+                            -Title "'Everyone' has Apply Group Policy on '$($gpo.DisplayName)'" `
+                            -Detail 'Everyone includes unauthenticated/anonymous contexts in some configurations.' `
+                            -Recommendation 'Replace Everyone with Authenticated Users or a scoped security group.' `
+                            -RelatedObject $gpo.DisplayName
+                    }
+                    elseif ($trusteeName -notin $broadGroups -and $trusteeType -in @('Group', 'WellKnownGroup') ) {
+                        Add-AuditFinding -Severity Informational -Category 'Security' `
+                            -Title "Custom security filtering on '$($gpo.DisplayName)'" `
+                            -Detail "Apply Group Policy is granted to custom group '$trusteeName' (security filtering in use)." `
+                            -Recommendation 'Confirm group membership matches the intended scope. Remember: since MS16-072, the COMPUTER account must also have Read for user policy to apply.' `
+                            -RelatedObject $gpo.DisplayName
+                    }
+                }
+                'GpoRead' {
+                    if ($trusteeName -eq 'Authenticated Users') { $hasAuthUsersRead = $true }
+                }
+                'GpoEditDeleteModifySecurity|GpoEdit' {
+                    $sev = $null
+                    if ($trusteeName -in @('Everyone', 'Authenticated Users', 'Domain Users', 'Users')) { $sev = 'Critical' }
+                    elseif ($trusteeType -eq 'User' -and $trusteeName -notmatch 'Admin') { $sev = 'High' }
+                    if ($sev) {
+                        Add-AuditFinding -Severity $sev -Category 'Security' `
+                            -Title "Broad/non-admin edit rights on '$($gpo.DisplayName)'" `
+                            -Detail "'$trusteeName' holds $permission. GPO edit rights are equivalent to code execution on every computer/user the GPO reaches." `
+                            -Recommendation 'Restrict edit and modify-security rights to dedicated GPO administration groups.' `
+                            -RelatedObject $gpo.DisplayName
+                    }
+                    elseif ($permission -eq 'GpoEditDeleteModifySecurity' -and $trusteeName -notin $adminOwners) {
+                        Add-AuditFinding -Severity Medium -Category 'Security' `
+                            -Title "GpoEditDeleteModifySecurity delegated on '$($gpo.DisplayName)'" `
+                            -Detail "'$trusteeName' can edit, delete, and change security on this GPO." `
+                            -Recommendation 'Verify this delegation is intentional and the group is tightly controlled.' `
+                            -RelatedObject $gpo.DisplayName
+                    }
+                }
+                'GpoCustom' {
+                    Add-AuditFinding -Severity Low -Category 'Security' `
+                        -Title "Custom ACL on '$($gpo.DisplayName)' for '$trusteeName'" `
+                        -Detail 'Non-standard permission set (GpoCustom). This can hide Apply-without-Read or Deny ACEs that Get-GPPermission cannot express.' `
+                        -Recommendation 'Inspect the raw ACL in GPMC (Delegation > Advanced) for deny entries or missing Read paired with Apply.' `
+                        -RelatedObject $gpo.DisplayName
+                }
+            }
+            if ($trusteeName -match 'ANONYMOUS') {
+                Add-AuditFinding -Severity High -Category 'Security' `
+                    -Title "Anonymous permission entry on '$($gpo.DisplayName)'" `
+                    -Detail "Anonymous Logon holds $permission." `
+                    -Recommendation 'Remove Anonymous ACEs from GPOs.' -RelatedObject $gpo.DisplayName
+            }
+        }
+        # MS16-072: user policy is read in the computer's context, so if neither
+        # Authenticated Users nor Domain Computers retains Read, the GPO can
+        # silently fail to apply. Note: this is NOT a flag on Authenticated Users
+        # having Read - that is the healthy default.
+        if (-not $hasAuthUsersRead -and -not $hasDomCompApply) {
+            $domCompRead = @($perms | Where-Object {
+                    "$(Get-PropertySafe -InputObject $_.Trustee -Name 'Name')" -like '*Domain Computers' }).Count -gt 0
+            if (-not $domCompRead) {
+                Add-AuditFinding -Severity High -Category 'Security' `
+                    -Title "'$($gpo.DisplayName)' lacks Read for Authenticated Users AND Domain Computers" `
+                    -Detail 'After MS16-072, GPOs are retrieved using the computer account. Without Read for either principal, user settings in this GPO will fail to apply (often silently).' `
+                    -Recommendation "Add 'Domain Computers: Read' (not Apply) or restore 'Authenticated Users: Read' on the Delegation tab." `
+                    -RelatedObject $gpo.DisplayName
+            }
+        }
+        if ($hasAuthUsersApply) {
+            Add-AuditFinding -Severity Informational -Category 'Security' `
+                -Title "'$($gpo.DisplayName)': Authenticated Users has Read + Apply (default scope)" `
+                -Detail 'This is the DEFAULT and is not inherently insecure - it means the GPO applies to every user/computer in linked scopes. Listed for completeness.' `
+                -Recommendation 'Use security filtering only when the GPO must be narrower than its links.' `
+                -RelatedObject $gpo.DisplayName
+        }
+        # Owner check
+        $ownerOk = $false
+        foreach ($a in $adminOwners) { if ("$($gpo.Owner)" -like "*$a*") { $ownerOk = $true; break } }
+        if (-not $ownerOk -and -not [string]::IsNullOrEmpty("$($gpo.Owner)")) {
+            Add-AuditFinding -Severity Medium -Category 'Security' `
+                -Title "Unexpected owner on '$($gpo.DisplayName)': $($gpo.Owner)" `
+                -Detail 'GPO owners can modify the GPO regardless of the delegation list.' `
+                -Recommendation 'Transfer ownership to Domain Admins unless this is a documented delegation.' `
+                -RelatedObject $gpo.DisplayName
+        }
+    }
+    Write-Progress -Activity 'GPO permission audit' -Completed
+    Export-AuditDataset -Name 'GPOPermissions' -Data $permRecords.ToArray() -Folder $script:Paths.Permissions
+}
+
+function Get-WmiFilterAudit {
+    <#
+    .SYNOPSIS
+        Enumerates all WMI filters via LDAP (msWMI-Som), documents queries, maps
+        GPO usage, and flags unused/broken/expensive filters.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $filters = @()
+    try {
+        $filters = @(Get-ADObject -LDAPFilter '(objectClass=msWMI-Som)' `
+                -SearchBase "CN=SOM,CN=WMIPolicy,CN=System,$($script:DomainDN)" `
+                -Properties 'msWMI-Name', 'msWMI-Parm1', 'msWMI-Parm2', 'msWMI-Author', 'msWMI-ID', 'whenCreated', 'whenChanged' `
+                @script:AdParams -ErrorAction Stop)
+    }
+    catch {
+        Add-UnavailableItem -Area 'WMI filter enumeration' -Reason $_.Exception.Message
+        return
+    }
+    Write-AuditLog -Level Info -Message "Found $($filters.Count) WMI filters."
+
+    # Map WMI filter ID -> GPOs using it (from the groupPolicyContainer attribute,
+    # which also exposes references to filters that no longer exist).
+    $usage = @{}
+    $brokenRefs = @()
+    try {
+        $gpcs = @(Get-ADObject -LDAPFilter '(objectClass=groupPolicyContainer)' `
+                -SearchBase "CN=Policies,CN=System,$($script:DomainDN)" `
+                -Properties displayName, gPCWQLFilter @script:AdParams -ErrorAction Stop)
+        $filterIds = @{}
+        foreach ($f in $filters) { $filterIds[("$($f.'msWMI-ID')").ToLower()] = $true }
+        foreach ($gpc in $gpcs) {
+            $wql = "$(Get-PropertySafe -InputObject $gpc -Name 'gPCWQLFilter')"
+            if ([string]::IsNullOrWhiteSpace($wql)) { continue }
+            # Format: [domain;{GUID};0]
+            if ($wql -match '\{[0-9a-fA-F\-]+\}') {
+                $fid = $Matches[0].ToLower()
+                if (-not $usage.ContainsKey($fid)) { $usage[$fid] = @() }
+                $usage[$fid] += "$($gpc.displayName)"
+                if (-not $filterIds.ContainsKey($fid)) {
+                    $brokenRefs += [pscustomobject]@{ Gpo = "$($gpc.displayName)"; FilterId = $fid }
+                }
+            }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'WMI filter usage mapping' -Reason $_.Exception.Message
+    }
+
+    $records = New-Object System.Collections.Generic.List[object]
+    foreach ($f in $filters) {
+        $name = "$($f.'msWMI-Name')"
+        $id   = ("$($f.'msWMI-ID')").ToLower()
+        # msWMI-Parm2 packs queries as:  <count>;3;<nsLen>;<qryLen>;WQL;<namespace>;<query>;...
+        $parm2 = "$($f.'msWMI-Parm2')"
+        $queries = @()
+        $namespaces = @()
+        if ($parm2) {
+            $parts = $parm2 -split ';'
+            for ($p = 0; $p -lt $parts.Count; $p++) {
+                if ($parts[$p] -eq 'WQL' -and ($p + 2) -lt $parts.Count) {
+                    $namespaces += $parts[$p + 1]
+                    $queries    += $parts[$p + 2]
+                }
+            }
+        }
+        $usedBy = @()
+        if ($usage.ContainsKey($id)) { $usedBy = @($usage[$id] | Select-Object -Unique) }
+        $records.Add([pscustomobject]@{
+                Name         = $name
+                Description  = "$(Get-PropertySafe -InputObject $f -Name 'msWMI-Parm1')"
+                Author       = "$(Get-PropertySafe -InputObject $f -Name 'msWMI-Author')"
+                Created      = $f.whenCreated
+                Modified     = $f.whenChanged
+                FilterId     = $id
+                Namespaces   = ($namespaces -join '; ')
+                Queries      = ($queries -join ' | ')
+                UsedByGpos   = ($usedBy -join '; ')
+                UsedByCount  = $usedBy.Count
+            })
+        if ($usedBy.Count -eq 0) {
+            Add-AuditFinding -Severity Low -Category 'WMIFilter' `
+                -Title "Unused WMI filter: '$name'" `
+                -Detail 'No GPO references this filter.' `
+                -Recommendation 'Delete unused WMI filters to reduce clutter (verify with change control first).' `
+                -RelatedObject $name
+        }
+        foreach ($q in $queries) {
+            if ($q -match 'Win32_Product') {
+                Add-AuditFinding -Severity High -Category 'WMIFilter' `
+                    -Title "WMI filter '$name' queries Win32_Product" `
+                    -Detail "Query: $q. Win32_Product triggers msiexec reconfiguration/validation of EVERY installed MSI at each policy refresh - a well-known performance and stability hazard." `
+                    -Recommendation 'Rewrite using Win32Reg_AddRemovePrograms, CIM_DataFile on a marker file, or registry-based targeting.' `
+                    -RelatedObject $name
+            }
+            elseif ($q -match 'CIM_DataFile|Win32_Directory' -and $q -match "(?i)like\s+'%") {
+                Add-AuditFinding -Severity Medium -Category 'WMIFilter' `
+                    -Title "Potentially expensive WMI query in filter '$name'" `
+                    -Detail "Query: $q. Unanchored LIKE scans over file-system classes are slow at every GP refresh." `
+                    -Recommendation 'Anchor the query (drive + path) or use a cheaper class.' `
+                    -RelatedObject $name
+            }
+        }
+        foreach ($ns in $namespaces) {
+            if ($ns -notmatch '^(?i)root\\') {
+                Add-AuditFinding -Severity Medium -Category 'WMIFilter' `
+                    -Title "WMI filter '$name' uses suspicious namespace '$ns'" `
+                    -Detail 'Namespace does not start with root\; the filter may fail to evaluate (fails CLOSED for the GPO - it will not apply).' `
+                    -Recommendation 'Correct the namespace (typically root\CIMv2).' `
+                    -RelatedObject $name
+            }
+        }
+    }
+    foreach ($br in $brokenRefs) {
+        Add-AuditFinding -Severity High -Category 'WMIFilter' `
+            -Title "GPO '$($br.Gpo)' references a MISSING WMI filter" `
+            -Detail "gPCWQLFilter points at $($br.FilterId), which does not exist. The GPO will NOT apply to anything (missing filters fail closed)." `
+            -Recommendation 'Clear the WMI filter reference on the GPO or recreate the filter.' `
+            -RelatedObject $br.Gpo
+    }
+    Export-AuditDataset -Name 'WMIFilters' -Data $records.ToArray() -Folder $script:Paths.WMIFilters
+}
+
+# =============================================================================
+#  Analysis: applied/denied GPOs, SYSVOL consistency, inventory findings
+# =============================================================================
+
+function Get-AppliedGpoAnalysis {
+    <#
+    .SYNOPSIS
+        Parses the gpresult /X XML to produce applied/denied GPO tables (with
+        denial reasons), security group membership, site, slow link and loopback
+        status for computer and user scopes.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $xmlPath = Join-Path $script:Paths.RSOP 'GPResult.xml'
+    if (-not (Test-Path -LiteralPath $xmlPath)) {
+        Add-UnavailableItem -Area 'Applied/denied GPO analysis' -Reason 'GPResult.xml was not collected (gpresult /X failed or target offline).'
+        return $null
+    }
+    try {
+        $xml = [xml](Get-Content -LiteralPath $xmlPath -Raw)
+    }
+    catch {
+        Add-UnavailableItem -Area 'Applied/denied GPO analysis' -Reason "GPResult.xml could not be parsed: $($_.Exception.Message)"
+        return $null
+    }
+
+    $summary = [ordered]@{
+        ComputerSite     = ''
+        ComputerDomain   = ''
+        SlowLink         = ''
+        LoopbackMode     = 'Not reported'
+        ComputerGroups   = @()
+        UserGroups       = @()
+    }
+    $applied = New-Object System.Collections.Generic.List[object]
+    $denied  = New-Object System.Collections.Generic.List[object]
+
+    foreach ($scope in @('ComputerResults', 'UserResults')) {
+        $scopeLabel = $(if ($scope -eq 'ComputerResults') { 'Computer' } else { 'User' })
+        $scopeNodes = $xml.SelectNodes("//*[local-name()='$scope']")
+        if ($scopeNodes.Count -eq 0) { continue }
+        $sn = $scopeNodes[0]
+
+        $siteNode = $sn.SelectSingleNode("*[local-name()='Site']")
+        if ($siteNode -and $scopeLabel -eq 'Computer') { $summary.ComputerSite = $siteNode.InnerText }
+        $domNode = $sn.SelectSingleNode("*[local-name()='Domain']")
+        if ($domNode -and $scopeLabel -eq 'Computer') { $summary.ComputerDomain = $domNode.InnerText }
+        $slowNode = $sn.SelectSingleNode("*[local-name()='SlowLink']")
+        if ($slowNode -and $scopeLabel -eq 'Computer') { $summary.SlowLink = $slowNode.InnerText }
+        $loopNode = $sn.SelectSingleNode("*[local-name()='LoopbackMode']")
+        if ($loopNode) { $summary.LoopbackMode = $loopNode.InnerText }
+
+        $groups = @($sn.SelectNodes("*[local-name()='SecurityGroup']/*[local-name()='Name']") | ForEach-Object { $_.InnerText })
+        if ($groups.Count -eq 0) {
+            $groups = @($sn.SelectNodes(".//*[local-name()='SecurityGroup']") | ForEach-Object {
+                    $n = $_.SelectSingleNode("*[local-name()='Name']"); if ($n) { $n.InnerText } })
+        }
+        if ($scopeLabel -eq 'Computer') { $summary.ComputerGroups = $groups } else { $summary.UserGroups = $groups }
+
+        foreach ($gpoNode in @($sn.SelectNodes("*[local-name()='GPO']"))) {
+            $get = { param($xpath) $n = $gpoNode.SelectSingleNode($xpath); if ($n) { $n.InnerText } else { '' } }
+            $name        = & $get "*[local-name()='Name']"
+            $guid        = & $get "*[local-name()='Path']/*[local-name()='Identifier']"
+            $enabledTxt  = & $get "*[local-name()='Enabled']"
+            $validTxt    = & $get "*[local-name()='IsValid']"
+            $filterOkTxt = & $get "*[local-name()='FilterAllowed']"
+            $accessTxt   = & $get "*[local-name()='AccessDenied']"
+            $somPath     = & $get "*[local-name()='Link']/*[local-name()='SOMPath']"
+            $somOrder    = & $get "*[local-name()='Link']/*[local-name()='SOMOrder']"
+            $appliedOrd  = & $get "*[local-name()='Link']/*[local-name()='AppliedOrder']"
+            $linkOrder   = & $get "*[local-name()='Link']/*[local-name()='LinkOrder']"
+            $enforcedTxt = & $get "*[local-name()='Link']/*[local-name()='NoOverride']"
+            $filterName  = & $get "*[local-name()='FilterName']"
+
+            $isEnabled  = ($enabledTxt -ne 'false')
+            $isValid    = ($validTxt -ne 'false')
+            $filterOk   = ($filterOkTxt -ne 'false')
+            $accessDeny = ($accessTxt -eq 'true')
+            $wasApplied = ($isEnabled -and $isValid -and $filterOk -and -not $accessDeny -and $appliedOrd -and $appliedOrd -ne '0')
+
+            $reason = ''
+            if (-not $wasApplied) {
+                if ($accessDeny)          { $reason = 'Denied by security filtering (no Apply Group Policy permission)' }
+                elseif (-not $filterOk)   { $reason = $(if ($filterName) { "Denied by WMI filter '$filterName' (evaluated false)" } else { 'Denied by WMI filter (evaluated false)' }) }
+                elseif (-not $isEnabled)  { $reason = 'Link or GPO half disabled for this scope' }
+                elseif (-not $isValid)    { $reason = 'GPO inaccessible or corrupt (IsValid=false) - check SYSVOL' }
+                else                      { $reason = 'Empty for this scope / not applied (no AppliedOrder)' }
+            }
+
+            $rec = [pscustomobject]@{
+                Scope        = $scopeLabel
+                GpoName      = $name
+                GpoGuid      = $guid
+                LinkLocation = $somPath
+                SOMOrder     = $somOrder
+                LinkOrder    = $linkOrder
+                AppliedOrder = $appliedOrd
+                Enforced     = ($enforcedTxt -eq 'true')
+                Applied      = $wasApplied
+                DenialReason = $reason
+                WmiFilter    = $filterName
+            }
+            if ($wasApplied) { $applied.Add($rec) } else { $denied.Add($rec) }
+        }
+    }
+
+    if ("$($summary.LoopbackMode)" -notin @('', 'Not reported')) {
+        Add-AuditFinding -Severity Informational -Category 'Processing' `
+            -Title "RSOP reports loopback mode: $($summary.LoopbackMode)" `
+            -Detail 'User policy scope is affected by GPOs linked to the computer location.' `
+            -Recommendation 'Review the applied-user list with loopback in mind.' -RelatedObject 'RSOP'
+    }
+    if ("$($summary.SlowLink)" -eq 'true') {
+        Add-AuditFinding -Severity Medium -Category 'Processing' `
+            -Title 'Group Policy detected a SLOW LINK at last processing' `
+            -Detail 'On slow links, software installation, folder redirection, and scripts are skipped by default.' `
+            -Recommendation 'Check bandwidth to the DC; adjust the slow-link threshold policy if this is a false positive (VPN adapters are a common cause).' `
+            -RelatedObject 'RSOP'
+    }
+    foreach ($d in $denied) {
+        if ($d.DenialReason -match 'IsValid=false') {
+            Add-AuditFinding -Severity High -Category 'Processing' `
+                -Title "GPO '$($d.GpoName)' is inaccessible from the client" `
+                -Detail $d.DenialReason `
+                -Recommendation 'Verify the SYSVOL folder for this GPO exists and replication is healthy.' `
+                -RelatedObject $d.GpoName
+        }
+    }
+
+    Export-AuditDataset -Name 'AppliedGPOs' -Data $applied.ToArray() -Folder $script:Paths.Summary
+    Export-AuditDataset -Name 'DeniedGPOs'  -Data $denied.ToArray()  -Folder $script:Paths.Summary
+    $groupRecords = @()
+    $groupRecords += @($summary.ComputerGroups | ForEach-Object { [pscustomobject]@{ Scope = 'Computer'; Group = $_ } })
+    $groupRecords += @($summary.UserGroups     | ForEach-Object { [pscustomobject]@{ Scope = 'User';     Group = $_ } })
+    Export-AuditDataset -Name 'SecurityGroupMembership' -Data $groupRecords -Folder $script:Paths.Summary
+
+    # Per-scope copies in the Computer\ and User\ folders for easy consumption
+    Export-AuditDataset -Name 'AppliedGPOs-Computer' -Data @($applied | Where-Object { $_.Scope -eq 'Computer' }) -Folder $script:Paths.Computer
+    Export-AuditDataset -Name 'DeniedGPOs-Computer'  -Data @($denied  | Where-Object { $_.Scope -eq 'Computer' }) -Folder $script:Paths.Computer
+    Export-AuditDataset -Name 'AppliedGPOs-User'     -Data @($applied | Where-Object { $_.Scope -eq 'User' })     -Folder $script:Paths.User
+    Export-AuditDataset -Name 'DeniedGPOs-User'      -Data @($denied  | Where-Object { $_.Scope -eq 'User' })     -Folder $script:Paths.User
+
+    Write-AuditLog -Level Info -Message "Applied: $($applied.Count) GPO scope-entries; Denied/filtered: $($denied.Count)."
+    return [pscustomobject]@{
+        Applied  = $applied.ToArray()
+        Denied   = $denied.ToArray()
+        Summary  = [pscustomobject]$summary
+    }
+}
+
+function Test-SysvolConsistency {
+    <#
+    .SYNOPSIS
+        Read-only comparison of AD GPO objects vs SYSVOL folders, GPT.INI vs AD
+        version numbers, cpassword scanning, and script UNC availability.
+        NOTHING in SYSVOL is modified.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$DomainName)
+
+    $policiesPath = "\\$DomainName\SYSVOL\$DomainName\Policies"
+    $results = New-Object System.Collections.Generic.List[object]
+
+    if (-not (Test-Path -LiteralPath $policiesPath)) {
+        Add-UnavailableItem -Area 'SYSVOL validation' -Reason "Cannot access $policiesPath"
+        return
+    }
+
+    # --- AD side: every groupPolicyContainer (works even without -IncludeDomainInventory) ---
+    $adGpos = @{}
+    try {
+        $gpcs = @(Get-ADObject -LDAPFilter '(objectClass=groupPolicyContainer)' `
+                -SearchBase "CN=Policies,CN=System,$($script:DomainDN)" `
+                -Properties displayName, versionNumber, cn @script:AdParams -ErrorAction Stop)
+        foreach ($g in $gpcs) {
+            $adGpos[("$($g.cn)").ToLower()] = [pscustomobject]@{
+                Name    = "$($g.displayName)"
+                Version = [int64](Get-PropertySafe -InputObject $g -Name 'versionNumber' -Default 0)
+            }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'SYSVOL validation (AD side)' -Reason $_.Exception.Message
+        return
+    }
+
+    # --- SYSVOL side ---
+    $sysvolFolders = @{}
+    try {
+        foreach ($dir in @(Get-ChildItem -LiteralPath $policiesPath -Directory -ErrorAction Stop)) {
+            if ($dir.Name -match '^\{[0-9a-fA-F\-]+\}$') { $sysvolFolders[$dir.Name.ToLower()] = $dir.FullName }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'SYSVOL folder enumeration' -Reason $_.Exception.Message
+        return
+    }
+    Write-AuditLog -Level Info -Message "AD GPO objects: $($adGpos.Count); SYSVOL policy folders: $($sysvolFolders.Count)."
+
+    # --- Orphans in each direction ---
+    foreach ($guid in $adGpos.Keys) {
+        if (-not $sysvolFolders.ContainsKey($guid)) {
+            $results.Add([pscustomobject]@{ Guid = $guid; GpoName = $adGpos[$guid].Name; Issue = 'AD object without SYSVOL folder'; Detail = 'Clients cannot read this GPO.' })
+            Add-AuditFinding -Severity High -Category 'SYSVOL' `
+                -Title "GPO '$($adGpos[$guid].Name)' has NO SYSVOL folder ($guid)" `
+                -Detail 'The AD object exists but its SYSVOL content is missing; the GPO cannot apply and clients may log errors.' `
+                -Recommendation 'Restore the folder from backup or from a healthy replication partner; if the GPO is dead, delete it via GPMC (do NOT hand-edit SYSVOL).' `
+                -RelatedObject $adGpos[$guid].Name
+        }
+    }
+    foreach ($guid in $sysvolFolders.Keys) {
+        if (-not $adGpos.ContainsKey($guid)) {
+            $results.Add([pscustomobject]@{ Guid = $guid; GpoName = '(orphan)'; Issue = 'SYSVOL folder without AD object'; Detail = $sysvolFolders[$guid] })
+            Add-AuditFinding -Severity Medium -Category 'SYSVOL' `
+                -Title "Orphaned SYSVOL policy folder $guid" `
+                -Detail "Folder $($sysvolFolders[$guid]) has no matching AD GPO object (leftover from an incomplete delete or replication problem)." `
+                -Recommendation 'Confirm on all DCs, then remove via a controlled cleanup (e.g., GPMC status tools). This audit does not delete anything.' `
+                -RelatedObject $guid
+        }
+    }
+
+    # --- GPT.INI version vs AD versionNumber (user = high word, computer = low word) ---
+    foreach ($guid in $adGpos.Keys) {
+        if (-not $sysvolFolders.ContainsKey($guid)) { continue }
+        $gptIni = Join-Path $sysvolFolders[$guid] 'GPT.INI'
+        if (-not (Test-Path -LiteralPath $gptIni)) {
+            Add-AuditFinding -Severity High -Category 'SYSVOL' `
+                -Title "GPT.INI missing for '$($adGpos[$guid].Name)'" `
+                -Detail "No GPT.INI in $($sysvolFolders[$guid]); clients treat the GPO as unreadable." `
+                -Recommendation 'Restore from backup/replication partner.' -RelatedObject $adGpos[$guid].Name
+            continue
+        }
+        try {
+            $iniText = Get-Content -LiteralPath $gptIni -Raw -ErrorAction Stop
+            if ($iniText -match '(?im)^\s*Version\s*=\s*(\d+)') {
+                $sysvolVer = [int64]$Matches[1]
+                $adVer = $adGpos[$guid].Version
+                if ($sysvolVer -ne $adVer) {
+                    $results.Add([pscustomobject]@{ Guid = $guid; GpoName = $adGpos[$guid].Name; Issue = 'Version mismatch'; Detail = "AD=$adVer (user $([int]($adVer -shr 16))/computer $([int]($adVer -band 0xFFFF))) vs SYSVOL=$sysvolVer (user $([int]($sysvolVer -shr 16))/computer $([int]($sysvolVer -band 0xFFFF)))" })
+                    Add-AuditFinding -Severity Medium -Category 'SYSVOL' `
+                        -Title "Version mismatch AD vs SYSVOL for '$($adGpos[$guid].Name)'" `
+                        -Detail "AD versionNumber=$adVer, GPT.INI Version=$sysvolVer. Persistent mismatches indicate SYSVOL replication lag or failure and cause clients to skip re-processing." `
+                        -Recommendation 'Check DFSR SYSVOL health (dfsrdiag, event log DFS Replication) and re-save the GPO to bump both versions once replication is fixed.' `
+                        -RelatedObject $adGpos[$guid].Name
+                }
+            }
+        }
+        catch {
+            Add-UnavailableItem -Area "GPT.INI read: $($adGpos[$guid].Name)" -Reason $_.Exception.Message
+        }
+    }
+
+    # --- cpassword scan (GPP legacy credential exposure, MS14-025) ---
+    try {
+        $prefXml = @(Get-ChildItem -LiteralPath $policiesPath -Recurse -Filter '*.xml' -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\(Preferences|Machine|User)\\' } |
+            Select-Object -First 2000)
+        $cpassHits = @()
+        foreach ($file in $prefXml) {
+            try {
+                $hit = Select-String -LiteralPath $file.FullName -Pattern 'cpassword\s*=\s*"[^"]+"' -List -ErrorAction SilentlyContinue
+                if ($hit) { $cpassHits += $file.FullName }
+            }
+            catch { }
+        }
+        foreach ($hit in $cpassHits) {
+            $results.Add([pscustomobject]@{ Guid = ''; GpoName = $hit; Issue = 'cpassword found'; Detail = 'Legacy GPP stored credential' })
+            Add-AuditFinding -Severity Critical -Category 'Security' `
+                -Title 'Group Policy Preferences cpassword found (MS14-025)' `
+                -Detail "File: $hit. The AES key for cpassword is public; any domain user can decrypt this password." `
+                -Recommendation 'Remove the preference item, rotate the exposed account password immediately, and redeploy via LAPS or another secret-safe mechanism.' `
+                -RelatedObject $hit
+        }
+        if ($cpassHits.Count -eq 0) { Write-AuditLog -Level Success -Message 'No cpassword values found in scanned preference XML files.' }
+    }
+    catch {
+        Add-UnavailableItem -Area 'cpassword scan' -Reason $_.Exception.Message
+    }
+
+    # --- Startup/logon script UNC availability ---
+    try {
+        $scriptsIni = @(Get-ChildItem -LiteralPath $policiesPath -Recurse -Include 'scripts.ini', 'psscripts.ini' -ErrorAction SilentlyContinue |
+            Select-Object -First 500)
+        $checked = @{}
+        foreach ($ini in $scriptsIni) {
+            $text = Get-Content -LiteralPath $ini.FullName -Raw -ErrorAction SilentlyContinue
+            if (-not $text) { continue }
+            foreach ($m in [regex]::Matches($text, '(?im)^\d+CmdLine\s*=\s*(\\\\\S+)$')) {
+                $unc = $m.Groups[1].Value.Trim()
+                if ($checked.ContainsKey($unc)) { continue }
+                $checked[$unc] = $true
+                if (-not (Test-Path -LiteralPath $unc -ErrorAction SilentlyContinue)) {
+                    Add-AuditFinding -Severity Medium -Category 'Scripts' `
+                        -Title "Startup/logon script UNC path unavailable: $unc" `
+                        -Detail "Referenced in $($ini.FullName) but not reachable from this audit host (may still work from clients - verify)." `
+                        -Recommendation 'Fix or remove the dead script reference; unreachable scripts slow logons while they time out.' `
+                        -RelatedObject $unc
+                }
+            }
+        }
+    }
+    catch {
+        Add-UnavailableItem -Area 'Script UNC validation' -Reason $_.Exception.Message
+    }
+
+    Export-AuditDataset -Name 'SysvolConsistency' -Data $results.ToArray() -Folder $script:Paths.RawData
+}
+
+function Invoke-GpoFindingsAnalysis {
+    <#
+    .SYNOPSIS
+        Inventory-driven hygiene findings: unlinked/empty/disabled GPOs, missing
+        descriptions, duplicates, stale/recent changes, version mismatches.
+    #>
+    [CmdletBinding()]
+    param([Parameter()][object[]]$Inventory = @())
+
+    if ($Inventory.Count -eq 0) { return }
+    $now = Get-Date
+
+    # Fill IsLinked from the link index built by Get-GpoLinkInventory
+    foreach ($g in $Inventory) {
+        $key = $g.Id.ToString().ToLower()
+        $g.IsLinked = $script:GpoLinkIndex.ContainsKey($key) -and ($script:GpoLinkIndex[$key].Count -gt 0)
+    }
+
+    foreach ($g in $Inventory) {
+        $name = $g.DisplayName
+        if (-not $g.IsLinked) {
+            Add-AuditFinding -Severity Low -Category 'Hygiene' -Title "Unlinked GPO: '$name'" `
+                -Detail 'The GPO exists but is not linked to any site, domain, or OU (it applies to nothing).' `
+                -Recommendation 'Back up and delete if obsolete, or link it where intended.' -RelatedObject $name
+        }
+        if ($g.AppearsEmpty -eq $true) {
+            Add-AuditFinding -Severity Low -Category 'Hygiene' -Title "Empty GPO: '$name'" `
+                -Detail 'No settings were found in either the computer or user half.' `
+                -Recommendation 'Delete empty GPOs; they add processing overhead and confusion.' -RelatedObject $name
+        }
+        if ($g.IsFullyDisabled) {
+            Add-AuditFinding -Severity Low -Category 'Hygiene' -Title "Fully disabled GPO: '$name'" `
+                -Detail 'GpoStatus = AllSettingsDisabled.' `
+                -Recommendation 'Delete or re-enable; document if kept intentionally.' -RelatedObject $name
+        }
+        elseif ($g.IsHalfDisabled) {
+            Add-AuditFinding -Severity Informational -Category 'Hygiene' -Title "Partially disabled GPO: '$name' ($($g.GpoStatus))" `
+                -Detail 'One half of the GPO is disabled. This is a legitimate optimization when that half is empty - verify it matches the content.' `
+                -Recommendation 'Confirm the disabled half really has no needed settings.' -RelatedObject $name
+        }
+        if ([string]::IsNullOrWhiteSpace("$($g.Description)")) {
+            Add-AuditFinding -Severity Informational -Category 'Hygiene' -Title "No description on GPO: '$name'" `
+                -Detail 'Undocumented GPOs slow down troubleshooting and change review.' `
+                -Recommendation 'Add owner/purpose/change-ticket to the GPO description.' -RelatedObject $name
+        }
+        try {
+            $age = ($now - [datetime]$g.ModificationTime).TotalDays
+            if ($age -gt $StaleGpoDays) {
+                Add-AuditFinding -Severity Low -Category 'Hygiene' -Title "Stale GPO: '$name' (unmodified for $([int]$age) days)" `
+                    -Detail "Last modified $($g.ModificationTime)." `
+                    -Recommendation 'Review whether the GPO is still needed; stale GPOs often contain obsolete settings.' -RelatedObject $name
+            }
+            elseif ($age -le $RecentGpoDays) {
+                Add-AuditFinding -Severity Informational -Category 'Change' -Title "Recently modified GPO: '$name'" `
+                    -Detail "Modified $($g.ModificationTime) (within $RecentGpoDays days). Relevant when correlating new problems." `
+                    -Recommendation 'Correlate with any recent incident timelines.' -RelatedObject $name
+            }
+        }
+        catch { }
+        if ($g.VersionMismatch) {
+            Add-AuditFinding -Severity Medium -Category 'SYSVOL' -Title "AD/SYSVOL version mismatch on '$name'" `
+                -Detail "User: DS=$($g.UserDSVersion) SYSVOL=$($g.UserSysvolVersion); Computer: DS=$($g.ComputerDSVersion) SYSVOL=$($g.ComputerSysvolVersion)." `
+                -Recommendation 'Check SYSVOL (DFSR) replication health; mismatches prevent clients from picking up changes.' -RelatedObject $name
+        }
+        if ($g.ContainsSoftwareInstall) {
+            Add-AuditFinding -Severity Informational -Category 'Content' -Title "GPO '$name' deploys software (MSI)" `
+                -Detail 'Software installation only processes at startup/logon (foreground) and never over slow links.' `
+                -Recommendation 'Confirm the package source share is reachable from all clients.' -RelatedObject $name
+        }
+    }
+
+    # Duplicate / similar names (normalized: case, spaces, dashes, underscores)
+    $byNorm = @{}
+    foreach ($g in $Inventory) {
+        $norm = ($g.DisplayName -replace '[\s\-_]', '').ToLower()
+        if (-not $byNorm.ContainsKey($norm)) { $byNorm[$norm] = @() }
+        $byNorm[$norm] += $g.DisplayName
+    }
+    foreach ($entry in $byNorm.GetEnumerator()) {
+        if ($entry.Value.Count -gt 1) {
+            Add-AuditFinding -Severity Low -Category 'Hygiene' `
+                -Title "Duplicate/similar GPO names: $($entry.Value -join ' <-> ')" `
+                -Detail 'Nearly identical names usually indicate abandoned copies or unclear ownership.' `
+                -Recommendation 'Consolidate or rename with a clear naming convention.' `
+                -RelatedObject ($entry.Value -join '; ')
+        }
+    }
+}
+
+# =============================================================================
+#  Reporting: master HTML (embedded CSS, portable), executive summary, findings
+# =============================================================================
+
+function ConvertTo-AuditHtmlTable {
+    <#
+    .SYNOPSIS
+        Renders objects as an HTML table with full encoding. Returns a fragment.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter()][AllowNull()][object[]]$Data,
+        [Parameter()][string[]]$Property,
+        [Parameter()][string]$EmptyMessage = 'No records.'
+    )
+    if ($null -eq $Data -or $Data.Count -eq 0) {
+        return "<p class='empty'>$([System.Net.WebUtility]::HtmlEncode($EmptyMessage))</p>"
+    }
+    if (-not $Property -or $Property.Count -eq 0) {
+        $Property = @($Data[0].PSObject.Properties | ForEach-Object { $_.Name })
+    }
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.Append('<div class="tablewrap"><table><thead><tr>')
+    foreach ($p in $Property) {
+        [void]$sb.AppendFormat('<th>{0}</th>', [System.Net.WebUtility]::HtmlEncode($p))
+    }
+    [void]$sb.Append('</tr></thead><tbody>')
+    foreach ($row in $Data) {
+        [void]$sb.Append('<tr>')
+        foreach ($p in $Property) {
+            $val = Get-PropertySafe -InputObject $row -Name $p
+            $text = $(if ($null -eq $val) { '' } else { "$val" })
+            $cls = ''
+            if ($p -in @('Severity')) { $cls = " class='sev-$($text.ToLower())'" }
+            elseif ($text -in @('True', 'False')) { $cls = " class='bool-$($text.ToLower())'" }
+            [void]$sb.AppendFormat('<td{0}>{1}</td>', $cls, [System.Net.WebUtility]::HtmlEncode($text))
+        }
+        [void]$sb.Append('</tr>')
+    }
+    [void]$sb.Append('</tbody></table></div>')
+    return $sb.ToString()
+}
+
+function New-MasterHtmlReport {
+    [CmdletBinding()]
+    param(
+        [Parameter()][object]$ComputerInfo,
+        [Parameter()][object]$RsopAnalysis,
+        [Parameter()][object[]]$Inventory = @(),
+        [Parameter()][object]$PrereqResult,
+        [Parameter(Mandatory)][hashtable]$Context
+    )
+    $enc = { param($s) [System.Net.WebUtility]::HtmlEncode("$s") }
+    $findings = @($script:Findings | Sort-Object @{ e = {
+                switch ($_.Severity) {
+                    'Critical' { 0 } 'High' { 1 } 'Medium' { 2 } 'Low' { 3 } default { 4 } } } })
+    $sevCounts = @{}
+    foreach ($sev in @('Critical', 'High', 'Medium', 'Low', 'Informational')) {
+        $sevCounts[$sev] = @($findings | Where-Object { $_.Severity -eq $sev }).Count
+    }
+    $applied = @(); $denied = @()
+    if ($RsopAnalysis) { $applied = @($RsopAnalysis.Applied); $denied = @($RsopAnalysis.Denied) }
+
+    $css = @"
+    :root { --crit:#b71c1c; --high:#e65100; --med:#f9a825; --low:#1565c0; --info:#546e7a; --ok:#2e7d32; }
+    * { box-sizing: border-box; }
+    body { font-family: 'Segoe UI', Tahoma, Arial, sans-serif; margin: 0; background: #f4f6f8; color: #212121; }
+    header { background: #1a237e; color: #fff; padding: 24px 32px; }
+    header h1 { margin: 0 0 4px 0; font-size: 24px; }
+    header .meta { font-size: 13px; opacity: .85; }
+    main { padding: 24px 32px; max-width: 1400px; margin: 0 auto; }
+    section { background: #fff; border-radius: 8px; padding: 20px 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+    h2 { margin-top: 0; font-size: 18px; color: #1a237e; border-bottom: 2px solid #e8eaf6; padding-bottom: 8px; }
+    h3 { font-size: 15px; color: #283593; }
+    .tiles { display: flex; flex-wrap: wrap; gap: 12px; margin: 8px 0 16px 0; }
+    .tile { flex: 1 1 140px; border-radius: 8px; padding: 14px; color: #fff; text-align: center; }
+    .tile .num { font-size: 30px; font-weight: 700; display: block; }
+    .tile .lbl { font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+    .t-crit { background: var(--crit); } .t-high { background: var(--high); }
+    .t-med { background: var(--med); color:#212121; } .t-low { background: var(--low); } .t-info { background: var(--info); }
+    .tablewrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; font-size: 12.5px; margin: 8px 0; }
+    th { background: #e8eaf6; text-align: left; padding: 6px 8px; position: sticky; top: 0; }
+    td { border-top: 1px solid #eceff1; padding: 5px 8px; vertical-align: top; }
+    tr:nth-child(even) td { background: #fafafa; }
+    td.sev-critical { color: var(--crit); font-weight: 700; }
+    td.sev-high { color: var(--high); font-weight: 700; }
+    td.sev-medium { color: #b28704; font-weight: 600; }
+    td.sev-low { color: var(--low); }
+    td.sev-informational { color: var(--info); }
+    td.bool-true { color: var(--ok); } td.bool-false { color: var(--crit); }
+    .kv { display: grid; grid-template-columns: 260px 1fr; gap: 4px 16px; font-size: 13px; }
+    .kv dt { font-weight: 600; color: #37474f; } .kv dd { margin: 0; word-break: break-word; }
+    .empty { color: #90a4ae; font-style: italic; }
+    .badge-ok { color: var(--ok); font-weight: 600; } .badge-warn { color: var(--high); font-weight: 600; }
+    footer { text-align: center; font-size: 12px; color: #90a4ae; padding: 16px; }
+    a { color: #1565c0; }
+"@
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">')
+    [void]$sb.AppendLine("<title>GPO Audit - $(& $enc $Context.ComputerName)</title><style>$css</style></head><body>")
+    [void]$sb.AppendLine("<header><h1>Group Policy Audit Report</h1><div class='meta'>")
+    [void]$sb.AppendLine("Generated $(& $enc (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')) | Operator: $(& $enc $Context.Operator) | Script v$($script:ScriptVersion)</div></header><main>")
+
+    # ---- Audit context ----
+    [void]$sb.AppendLine('<section><h2>Audit Context</h2><dl class="kv">')
+    $ctxRows = [ordered]@{
+        'Computer audited'   = $Context.ComputerName
+        'User audited'       = $(if ($Context.UserName) { $Context.UserName } else { '(none specified)' })
+        'Domain'             = $Context.Domain
+        'Domain controller'  = $Context.DomainController
+        'Audit host'         = $env:COMPUTERNAME
+        'PowerShell'         = "$($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition)) - GroupPolicy module mode: $($script:GPModuleMode)"
+        'Prerequisites'      = $(if ($PrereqResult) {
+                "Installed: $(@($PrereqResult.Installed).Count); Failed/skipped: $(@($PrereqResult.Failed).Count); Restart needed: $($PrereqResult.RestartNeeded)"
+            } else { 'All present (no installation attempted)' })
+        'Output folder'      = $Context.OutputPath
+    }
+    foreach ($k in $ctxRows.Keys) {
+        [void]$sb.AppendLine("<dt>$(& $enc $k)</dt><dd>$(& $enc $ctxRows[$k])</dd>")
+    }
+    [void]$sb.AppendLine('</dl></section>')
+
+    # ---- Executive summary ----
+    [void]$sb.AppendLine('<section><h2>Executive Summary</h2><div class="tiles">')
+    [void]$sb.AppendLine("<div class='tile t-crit'><span class='num'>$($sevCounts['Critical'])</span><span class='lbl'>Critical</span></div>")
+    [void]$sb.AppendLine("<div class='tile t-high'><span class='num'>$($sevCounts['High'])</span><span class='lbl'>High</span></div>")
+    [void]$sb.AppendLine("<div class='tile t-med'><span class='num'>$($sevCounts['Medium'])</span><span class='lbl'>Medium</span></div>")
+    [void]$sb.AppendLine("<div class='tile t-low'><span class='num'>$($sevCounts['Low'])</span><span class='lbl'>Low</span></div>")
+    [void]$sb.AppendLine("<div class='tile t-info'><span class='num'>$($sevCounts['Informational'])</span><span class='lbl'>Info</span></div>")
+    [void]$sb.AppendLine('</div>')
+    $execText = "This audit examined Group Policy for computer '$($Context.ComputerName)'" +
+    $(if ($Context.UserName) { " and user '$($Context.UserName)'" } else { '' }) +
+    " in domain '$($Context.Domain)'. " +
+    "$(@($applied | Where-Object { $_.Scope -eq 'Computer' }).Count) GPO(s) applied to the computer and " +
+    "$(@($applied | Where-Object { $_.Scope -eq 'User' }).Count) to the user scope; " +
+    "$($denied.Count) scope-entrie(s) were denied or filtered. " +
+    $(if ($Inventory.Count -gt 0) { "The domain contains $($Inventory.Count) GPO(s). " } else { 'Domain inventory was not requested. ' }) +
+    "The audit produced $($findings.Count) finding(s): $($sevCounts['Critical']) critical and $($sevCounts['High']) high-severity items requiring prompt attention."
+    [void]$sb.AppendLine("<p>$(& $enc $execText)</p></section>")
+
+    # ---- Target computer ----
+    if ($ComputerInfo) {
+        [void]$sb.AppendLine('<section><h2>Target Computer</h2><dl class="kv">')
+        foreach ($prop in $ComputerInfo.PSObject.Properties) {
+            [void]$sb.AppendLine("<dt>$(& $enc $prop.Name)</dt><dd>$(& $enc $prop.Value)</dd>")
+        }
+        [void]$sb.AppendLine('</dl></section>')
+    }
+
+    # ---- Applied / denied ----
+    [void]$sb.AppendLine('<section><h2>Applied GPOs</h2>')
+    [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data $applied -Property Scope, GpoName, LinkLocation, AppliedOrder, LinkOrder, Enforced, WmiFilter -EmptyMessage 'No applied-GPO data (RSOP collection unavailable).'))
+    [void]$sb.AppendLine('<h2>Denied / Filtered GPOs</h2>')
+    [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data $denied -Property Scope, GpoName, LinkLocation, DenialReason, WmiFilter -EmptyMessage 'No denied GPOs recorded.'))
+    if ($RsopAnalysis) {
+        [void]$sb.AppendLine('<h3>Processing context</h3><dl class="kv">')
+        [void]$sb.AppendLine("<dt>AD site (RSOP)</dt><dd>$(& $enc $RsopAnalysis.Summary.ComputerSite)</dd>")
+        [void]$sb.AppendLine("<dt>Slow link detected</dt><dd>$(& $enc $RsopAnalysis.Summary.SlowLink)</dd>")
+        [void]$sb.AppendLine("<dt>Loopback mode</dt><dd>$(& $enc $RsopAnalysis.Summary.LoopbackMode)</dd>")
+        [void]$sb.AppendLine('</dl>')
+    }
+    [void]$sb.AppendLine('</section>')
+
+    # ---- Findings ----
+    [void]$sb.AppendLine('<section><h2>Findings by Severity</h2>')
+    foreach ($sev in @('Critical', 'High', 'Medium', 'Low', 'Informational')) {
+        $items = @($findings | Where-Object { $_.Severity -eq $sev })
+        if ($items.Count -eq 0) { continue }
+        [void]$sb.AppendLine("<h3>$sev ($($items.Count))</h3>")
+        [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data $items -Property Severity, Category, Title, Detail, Recommendation))
+    }
+    if ($findings.Count -eq 0) { [void]$sb.AppendLine("<p class='badge-ok'>No findings were raised.</p>") }
+    [void]$sb.AppendLine('</section>')
+
+    # ---- Remediation ----
+    $remediation = @($findings | Where-Object { $_.Severity -in @('Critical', 'High', 'Medium') -and $_.Recommendation } |
+        Select-Object Severity, Category, Title, Recommendation)
+    [void]$sb.AppendLine('<section><h2>Recommended Remediation (prioritized)</h2>')
+    [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data $remediation -EmptyMessage 'No remediation required above Low severity.'))
+    [void]$sb.AppendLine('</section>')
+
+    # ---- Domain inventory ----
+    if ($Inventory.Count -gt 0) {
+        [void]$sb.AppendLine("<section><h2>Domain GPO Inventory ($($Inventory.Count))</h2>")
+        $invRows = @($Inventory | ForEach-Object {
+                [pscustomobject]@{
+                    Name        = $_.DisplayName
+                    Guid        = $_.Id
+                    Status      = $_.GpoStatus
+                    Linked      = $_.IsLinked
+                    Empty       = $_.AppearsEmpty
+                    WmiFilter   = $_.WmiFilter
+                    Modified    = $_.ModificationTime
+                    Extensions  = $_.Extensions
+                    Report      = $_.ReportFile
+                }
+            })
+        [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data $invRows))
+        [void]$sb.AppendLine('<h3>Individual GPO reports</h3><ul>')
+        foreach ($g in $Inventory) {
+            $href = 'DomainGPOs/' + [uri]::EscapeDataString("$($g.ReportFile)")
+            [void]$sb.AppendLine("<li><a href='$href'>$(& $enc $g.DisplayName)</a></li>")
+        }
+        [void]$sb.AppendLine('</ul></section>')
+
+        [void]$sb.AppendLine('<section><h2>GPO Link Map</h2>')
+        [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data (Get-PropertySafe -InputObject ([pscustomobject]$script:Datasets) -Name 'GPOLinks' -Default @()) -EmptyMessage 'Link inventory not collected.'))
+        [void]$sb.AppendLine('</section>')
+
+        [void]$sb.AppendLine('<section><h2>Security Filtering &amp; Delegation</h2>')
+        [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data (Get-PropertySafe -InputObject ([pscustomobject]$script:Datasets) -Name 'GPOPermissions' -Default @()) -EmptyMessage 'Permission audit not collected (use -IncludeSecurityAudit).'))
+        [void]$sb.AppendLine('</section>')
+
+        [void]$sb.AppendLine('<section><h2>WMI Filters</h2>')
+        [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data (Get-PropertySafe -InputObject ([pscustomobject]$script:Datasets) -Name 'WMIFilters' -Default @()) -EmptyMessage 'WMI filter audit not collected.'))
+        [void]$sb.AppendLine('</section>')
+    }
+
+    # ---- Unavailable data ----
+    [void]$sb.AppendLine('<section><h2>Data That Could Not Be Collected</h2>')
+    [void]$sb.AppendLine((ConvertTo-AuditHtmlTable -Data $script:Unavailable.ToArray() -EmptyMessage 'Everything requested was collected successfully.'))
+    [void]$sb.AppendLine('</section>')
+
+    [void]$sb.AppendLine("</main><footer>GPO Audit v$($script:ScriptVersion) - read-only audit - all data local to this folder</footer></body></html>")
+
+    $reportPath = Join-Path $Context.OutputPath 'GPOAudit-Report.html'
+    Set-Content -Path $reportPath -Value $sb.ToString() -Encoding UTF8
+    Write-AuditLog -Level Success -Message "Master HTML report: $reportPath"
+    return $reportPath
+}
+
+function Write-ExecutiveSummaryFiles {
+    <#
+    .SYNOPSIS
+        Plain-text executive summary + technical findings CSV/JSON exports.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][hashtable]$Context)
+
+    $findings = $script:Findings.ToArray()
+    Export-AuditDataset -Name 'Findings' -Data $findings -Folder $script:Paths.Summary
+    Export-AuditDataset -Name 'UnavailableData' -Data $script:Unavailable.ToArray() -Folder $script:Paths.Summary
+
+    $sevLine = foreach ($sev in @('Critical', 'High', 'Medium', 'Low', 'Informational')) {
+        '{0}: {1}' -f $sev, @($findings | Where-Object { $_.Severity -eq $sev }).Count
+    }
+    $top = @($findings | Where-Object { $_.Severity -in @('Critical', 'High') } | Select-Object -First 15 |
+        ForEach-Object { ' - [{0}] {1}' -f $_.Severity, $_.Title })
+    $lines = @(
+        'GROUP POLICY AUDIT - EXECUTIVE SUMMARY'
+        '======================================'
+        "Date          : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+        "Operator      : $($Context.Operator)"
+        "Computer      : $($Context.ComputerName)"
+        "User          : $(if ($Context.UserName) { $Context.UserName } else { '(none)' })"
+        "Domain        : $($Context.Domain)"
+        "DC            : $($Context.DomainController)"
+        ''
+        'FINDINGS'
+        ($sevLine -join ' | ')
+        ''
+        'TOP CRITICAL/HIGH ITEMS'
+        $(if ($top.Count -gt 0) { $top } else { ' (none)' })
+        ''
+        "Full details: GPOAudit-Report.html and Summary\Findings.csv"
+        "Items not collectable: $($script:Unavailable.Count) (see Summary\UnavailableData.csv)"
+    )
+    $sumPath = Join-Path $script:Paths.Summary 'ExecutiveSummary.txt'
+    $lines | Out-File -FilePath $sumPath -Encoding UTF8
+    Write-AuditLog -Level Success -Message "Executive summary: $sumPath"
+}
+
+# =============================================================================
+#  MAIN
+# =============================================================================
+$exitCode = 0
+$prereqResult  = $null
+$computerInfo  = $null
+$rsopAnalysis  = $null
+$inventory     = @()
+
+try {
+    Write-Host ''
+    Write-Host '=============================================================' -ForegroundColor Cyan
+    Write-Host "  Group Policy Audit v$script:ScriptVersion  (read-only)" -ForegroundColor Cyan
+    Write-Host '=============================================================' -ForegroundColor Cyan
+
+    # ---------------- Output folders + logging ----------------
+    if (-not $OutputPath) {
+        $OutputPath = Join-Path "$env:SystemDrive\GPOAudit" ('{0}_{1}' -f (($ComputerName -split '\.')[0]).ToUpper(), $script:StartTime.ToString('yyyyMMdd_HHmmss'))
+    }
+    foreach ($sub in @('Summary', 'Computer', 'User', 'DomainGPOs', 'Links', 'Permissions', 'WMI-Filters', 'RSOP', 'EventLogs', 'RawData', 'Logs')) {
+        $p = Join-Path $OutputPath $sub
+        if (-not (Test-Path -LiteralPath $p)) { $null = New-Item -Path $p -ItemType Directory -Force -ErrorAction Stop }
+    }
+    $script:Paths = @{
+        Root        = $OutputPath
+        Summary     = Join-Path $OutputPath 'Summary'
+        Computer    = Join-Path $OutputPath 'Computer'
+        User        = Join-Path $OutputPath 'User'
+        DomainGPOs  = Join-Path $OutputPath 'DomainGPOs'
+        Links       = Join-Path $OutputPath 'Links'
+        Permissions = Join-Path $OutputPath 'Permissions'
+        WMIFilters  = Join-Path $OutputPath 'WMI-Filters'
+        RSOP        = Join-Path $OutputPath 'RSOP'
+        EventLogs   = Join-Path $OutputPath 'EventLogs'
+        RawData     = Join-Path $OutputPath 'RawData'
+        Logs        = Join-Path $OutputPath 'Logs'
+    }
+    $script:LogFile = Join-Path $script:Paths.Logs 'GPOAudit.log'
+    try {
+        Start-Transcript -Path (Join-Path $script:Paths.Logs 'Transcript.txt') -ErrorAction Stop | Out-Null
+        $script:TranscriptOn = $true
+    }
+    catch {
+        Write-Warning "Start-Transcript failed ($($_.Exception.Message)); continuing with the custom log only."
+    }
+    Write-AuditLog -Level Info -Message "Output folder: $OutputPath"
+    Write-AuditLog -Level Info -Message "Command line: $($MyInvocation.Line)"
+
+    # ---------------- Phase 1: environment validation ----------------
+    Write-AuditLog -Level Section -Message 'Phase 1: Environment validation'
+    Write-AuditLog -Level Info -Message "PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition)) on $([Environment]::OSVersion.VersionString)"
+
+    if ($env:OS -ne 'Windows_NT') {
+        throw 'This script must run on Windows (it drives gpresult.exe, RSAT, and CIM).'
+    }
+    if (-not (Test-IsAdministrator)) {
+        throw 'Administrative privileges are required (computer-scope RSOP, event logs, RSAT installation). Start PowerShell elevated and rerun.'
+    }
+    Write-AuditLog -Level Success -Message 'Running with administrative privileges.'
+
+    $osInfo = Get-HostOsInfo
+    $null = Test-SupportedOperatingSystem -OsInfo $osInfo
+    Write-AuditLog -Level Success -Message "Operating system: $($osInfo.Caption) build $($osInfo.BuildNumber) ($(if ($osInfo.IsServer) { 'Server' } else { 'Client' }))"
+
+    $cs = Get-CimInstance -ClassName Win32_ComputerSystem -ErrorAction Stop
+    if (-not $cs.PartOfDomain) {
+        throw "This computer ($env:COMPUTERNAME) is not domain joined. A domain-joined audit host is required."
+    }
+    if (-not $Domain) { $Domain = $cs.Domain }
+    Write-AuditLog -Level Success -Message "Domain joined: $($cs.Domain) (auditing domain: $Domain)"
+
+    $script:HasCredential = ($Credential -and $Credential -ne [System.Management.Automation.PSCredential]::Empty)
+    $script:IsLocalTarget = Test-LocalTarget -Name $ComputerName
+
+    # ---------------- Phase 2: prerequisites ----------------
+    Write-AuditLog -Level Section -Message 'Phase 2: RSAT prerequisites'
+    $modulesPresent = (Get-Module -ListAvailable -Name GroupPolicy -ErrorAction SilentlyContinue) -and
+                      (Get-Module -ListAvailable -Name ActiveDirectory -ErrorAction SilentlyContinue)
+    if ($modulesPresent) {
+        Write-AuditLog -Level Success -Message 'GroupPolicy and ActiveDirectory modules are present.'
+    }
+    else {
+        Write-AuditLog -Level Warn -Message 'One or more RSAT modules are missing; checking installable prerequisites.'
+        $prereqResult = Install-AuditPrerequisites -OsInfo $osInfo -Unattended:$InstallPrerequisites
+    }
+
+    # ---------------- Phase 3: module import (PS 5.1 / 7 handling) ----------------
+    Write-AuditLog -Level Section -Message 'Phase 3: Module import'
+    $script:GPModuleMode = Import-AuditModule -Name GroupPolicy     -ProbeCommand Get-GPO
+    $script:ADModuleMode = Import-AuditModule -Name ActiveDirectory -ProbeCommand Get-ADDomain
+    Write-AuditLog -Level Info -Message "GroupPolicy module: $script:GPModuleMode | ActiveDirectory module: $script:ADModuleMode"
+
+    if ($script:GPModuleMode -eq 'Unavailable') {
+        if ($PSVersionTable.PSEdition -eq 'Core') {
+            Write-AuditLog -Level Error -Message 'The GroupPolicy module could not be loaded under PowerShell 7, even via the Windows PowerShell compatibility layer.'
+            if ($RelaunchInWindowsPowerShell) {
+                if ($script:TranscriptOn) { try { Stop-Transcript | Out-Null } catch { }; $script:TranscriptOn = $false }
+                Invoke-RelaunchInWindowsPowerShell -BoundParameters $PSBoundParameters
+            }
+            throw 'Run this script in Windows PowerShell 5.1 (powershell.exe), or rerun with -RelaunchInWindowsPowerShell. The GroupPolicy RSAT module is not natively supported on PowerShell 7.'
+        }
+        throw 'The GroupPolicy module is unavailable. Install RSAT (rerun with -InstallPrerequisites) and try again.'
+    }
+    if ($script:ADModuleMode -eq 'Unavailable') {
+        Write-AuditLog -Level Warn -Message 'ActiveDirectory module unavailable: OU/site/WMI-filter enumeration will be limited. Install Rsat.ActiveDirectory.DS-LDS.Tools / RSAT-AD-PowerShell.'
+        Add-UnavailableItem -Area 'ActiveDirectory module' -Reason 'Module not available; LDAP-based collection (OUs, sites, WMI filters, SYSVOL cross-check) is degraded.'
+    }
+
+    # ---------------- Phase 4: domain context + connectivity ----------------
+    Write-AuditLog -Level Section -Message 'Phase 4: Domain context and connectivity'
+    $connectivity = Test-AuditConnectivity -DomainName $Domain -PreferredDC $DomainController
+    if (-not $DomainController) { $DomainController = $connectivity.DomainController }
+
+    if ($script:HasCredential) { $script:AdParams.Credential = $Credential }
+    if ($DomainController) {
+        $script:AdParams.Server = $DomainController
+        $script:GpParams.Server = $DomainController
+    }
+    $script:GpParams.Domain = $Domain
+
+    if ($script:ADModuleMode -ne 'Unavailable') {
+        try {
+            $script:DomainInfo = Get-ADDomain -Identity $Domain @script:AdParams -ErrorAction Stop
+            $script:DomainDN = $script:DomainInfo.DistinguishedName
+            $rootDse = Get-ADRootDSE @script:AdParams -ErrorAction Stop
+            $script:ConfigNC = $rootDse.configurationNamingContext
+            Write-AuditLog -Level Success -Message "Domain DN: $script:DomainDN"
+        }
+        catch {
+            Write-AuditLog -Level Error -Message "AD domain query failed: $($_.Exception.Message)"
+            Add-UnavailableItem -Area 'AD domain context' -Reason $_.Exception.Message
+        }
+    }
+    if (-not $script:DomainDN) {
+        # LDAP fallback that works without the AD module
+        try {
+            $rootDse = [ADSI]"LDAP://$Domain/RootDSE"
+            $script:DomainDN = "$($rootDse.Get('defaultNamingContext'))"
+            $script:ConfigNC = "$($rootDse.Get('configurationNamingContext'))"
+            $script:DomainInfo = [pscustomobject]@{ DNSRoot = $Domain; DistinguishedName = $script:DomainDN }
+        }
+        catch {
+            Write-AuditLog -Level Error -Message "LDAP RootDSE fallback failed: $($_.Exception.Message)"
+        }
+    }
+
+    # ---------------- Phase 5: optional gpupdate (explicit opt-in only) ----------------
+    if ($ForceGPUpdate) {
+        Write-AuditLog -Level Section -Message 'Phase 5: gpupdate /force (explicitly requested)'
+        if ($PSCmdlet.ShouldProcess($ComputerName, 'gpupdate /force')) {
+            try {
+                if ($script:IsLocalTarget) {
+                    & "$env:SystemRoot\System32\gpupdate.exe" /force 2>&1 | ForEach-Object { Write-AuditLog -Level Info -Message "gpupdate: $_" }
+                }
+                else {
+                    Test-TargetConnectivity -Target $ComputerName
+                    if ($script:WinRMAvailable) {
+                        $icm = @{ ComputerName = $ComputerName; ErrorAction = 'Stop' }
+                        if ($script:HasCredential) { $icm.Credential = $Credential }
+                        Invoke-Command @icm -ScriptBlock { & "$env:SystemRoot\System32\gpupdate.exe" /force 2>&1 } |
+                            ForEach-Object { Write-AuditLog -Level Info -Message "gpupdate[remote]: $_" }
+                    }
+                    else { Add-UnavailableItem -Area 'gpupdate /force (remote)' -Reason 'WinRM unavailable.' }
+                }
+            }
+            catch { Write-AuditLog -Level Error -Message "gpupdate failed: $($_.Exception.Message)" }
+        }
+    }
+
+    # ---------------- Phase 6: target computer ----------------
+    $script:__ci = $null
+    Invoke-AuditStep -Name 'Phase 6: Target connectivity and computer information' -Action {
+        Test-TargetConnectivity -Target $ComputerName
+        $script:__ci = Get-TargetComputerInfo -Target $ComputerName
+    }
+    $computerInfo = $script:__ci
+
+    # ---------------- Phase 7: RSOP / gpresult ----------------
+    $doRsop = $true
+    if ($SkipRemoteRSOP -and -not $script:IsLocalTarget) {
+        Write-AuditLog -Level Info -Message 'SkipRemoteRSOP set: skipping gpresult/RSOP against the remote target.'
+        Add-UnavailableItem -Area 'RSOP collection' -Reason 'Skipped by -SkipRemoteRSOP.'
+        $doRsop = $false
+    }
+    if ($doRsop) {
+        Invoke-AuditStep -Name 'Phase 7a: gpresult collection (/R /Z /H /X)' -Action {
+            Invoke-GpResultCollection -Target $ComputerName -User $UserName
+        }
+        Invoke-AuditStep -Name 'Phase 7b: Get-GPResultantSetOfPolicy' -Action {
+            Invoke-RsopCollection -Target $ComputerName -User $UserName
+        }
+        $script:__rsop = $null
+        Invoke-AuditStep -Name 'Phase 7c: Applied/denied GPO analysis' -Action {
+            $script:__rsop = Get-AppliedGpoAnalysis
+        }
+        $rsopAnalysis = $script:__rsop
+    }
+
+    # ---------------- Phase 8: event logs ----------------
+    if ($IncludeEventLogs) {
+        Invoke-AuditStep -Name 'Phase 8: Group Policy operational event log' -Action {
+            Get-GroupPolicyEventLogData -Target $ComputerName -Days $EventLogDays
+        }
+    }
+
+    # ---------------- Phase 9: domain inventory / links / permissions / WMI ----------------
+    if ($IncludeDomainInventory -or $IncludeSecurityAudit) {
+        $script:__inv = @()
+        Invoke-AuditStep -Name 'Phase 9a: Domain GPO inventory' -Action {
+            $script:__inv = Get-DomainGpoInventory
+        }
+        $inventory = @($script:__inv)
+    }
+    if ($IncludeDomainInventory -and $script:ADModuleMode -ne 'Unavailable') {
+        Invoke-AuditStep -Name 'Phase 9b: GPO link inventory (sites/domain/OUs)' -Action {
+            $null = Get-GpoLinkInventory
+        }
+    }
+    if ($IncludeSecurityAudit -or $IncludeDomainInventory) {
+        Invoke-AuditStep -Name 'Phase 9c: Security filtering and delegation audit' -Action {
+            Get-GpoPermissionAudit
+        }
+        if ($script:ADModuleMode -ne 'Unavailable') {
+            Invoke-AuditStep -Name 'Phase 9d: WMI filter audit' -Action {
+                Get-WmiFilterAudit
+            }
+        }
+    }
+
+    # ---------------- Phase 10: SYSVOL validation ----------------
+    if ($script:ADModuleMode -ne 'Unavailable' -and $script:DomainDN) {
+        Invoke-AuditStep -Name 'Phase 10: SYSVOL validation (read-only)' -Action {
+            Test-SysvolConsistency -DomainName $Domain
+        }
+    }
+
+    # ---------------- Phase 11: findings + reports ----------------
+    Invoke-AuditStep -Name 'Phase 11: Findings analysis' -Action {
+        Invoke-GpoFindingsAnalysis -Inventory $inventory
+    }
+
+    Write-AuditLog -Level Section -Message 'Phase 12: Report generation'
+    $context = @{
+        ComputerName     = $ComputerName
+        UserName         = $UserName
+        Domain           = $Domain
+        DomainController = "$DomainController"
+        Operator         = "$env:USERDOMAIN\$env:USERNAME"
+        OutputPath       = $OutputPath
+    }
+    Write-ExecutiveSummaryFiles -Context $context
+    $script:MasterReport = New-MasterHtmlReport -ComputerInfo $computerInfo -RsopAnalysis $rsopAnalysis `
+        -Inventory $inventory -PrereqResult $prereqResult -Context $context
+
+    # ---------------- Wrap-up ----------------
+    $elapsed = (Get-Date) - $script:StartTime
+    Write-Host ''
+    Write-Host '=============================================================' -ForegroundColor Cyan
+    Write-Host ('  Audit complete in {0:mm\:ss}  -  {1} finding(s), {2} item(s) unavailable' -f $elapsed, $script:Findings.Count, $script:Unavailable.Count) -ForegroundColor Cyan
+    Write-Host "  Report: $script:MasterReport" -ForegroundColor Cyan
+    Write-Host '=============================================================' -ForegroundColor Cyan
+    if ($script:RestartNeeded) {
+        Write-Warning 'A restart is still required to finish prerequisite installation.'
+    }
+    if ($OpenReport -and $script:MasterReport -and (Test-Path -LiteralPath $script:MasterReport)) {
+        Invoke-Item -Path $script:MasterReport
+    }
+}
+catch {
+    $exitCode = 1
+    $msg = $_.Exception.Message
+    Write-AuditLog -Level Error -Message "FATAL: $msg"
+    Write-Error -Message "GPO audit aborted: $msg" -ErrorAction Continue
+    if ($_.ScriptStackTrace) { Write-AuditLog -Level Debug -Message $_.ScriptStackTrace }
+}
+finally {
+    if ($script:CimSession) {
+        try { Remove-CimSession -CimSession $script:CimSession -ErrorAction SilentlyContinue } catch { }
+    }
+    if ($script:TranscriptOn) {
+        try { Stop-Transcript | Out-Null } catch { }
+    }
+}
+exit $exitCode
