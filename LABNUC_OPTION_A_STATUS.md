@@ -21,3 +21,28 @@ Original `New-SelfSignedCertificate` passed BOTH `-DnsName` and a SAN via `-Text
 
 ## Register HTTPS transport with winrdp-mcp
 add_host alias="LAB-NUC" host="192.168.111.9" username="dandrews" use_ssl=true winrm_port=5986 winrm_cert_validation="ignore"
+
+---
+## UPDATE 2026-09-02 ~14:40 — root cause of the auth failures (RESOLVED)
+The intermittent `0xC000006A` (wrong password, network logon type 3) failures were NOT
+lockout and NOT a rotated password. **Root cause: vault-key split-brain.** The winrdp-mcp
+server was registered in Claude Code with WINRDP_VAULT_KEY=`EdE3BtWC...` while the on-disk
+vault (`~/.config/winrdp-mcp/vault-key.txt` = `Erad4YKc...`) encrypted the record with a
+DIFFERENT key. The server decrypted the password to garbage -> 0xC000006A on every network
+logon, while interactive RDP and in-process Python (which read the file key) both worked.
+
+Fix applied: re-registered the MCP server with the file's key (`claude mcp add ... -e
+WINRDP_VAULT_KEY=$(cat ~/.config/winrdp-mcp/vault-key.txt)`). Keys now MATCH. test_host over
+HTTPS 5986 returns online, whoami=lab-nuc\dandrews.
+
+**Lesson for both sessions: there is ONE vault key. Do not let a session generate or register
+a second one.** Always source it from `~/.config/winrdp-mcp/vault-key.txt`. If you re-register
+the server, pass that exact file's contents.
+
+Also disabled `provision_host` in the MCP server (its SMB/WMI cold-start fired the extra failed
+logons that made this look like a lockout). Firewall RDP+WinRM rules confirmed already scoped
+to 192.168.111.0/24. Vault cert_validation reverted to 'ignore' (package transport has no
+ca_trust wiring; 'validate' broke probe() with SSLError — NTLM still encrypts the payload).
+
+STILL OPEN: rotate the dandrews password (leaked in an earlier transcript); create a break-glass
+second local admin so a future dandrews issue doesn't cost all remote access.
