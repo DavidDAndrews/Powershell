@@ -3,3 +3,27 @@ Backup-Working/dotnet-sdk-9.0.300-win-x64.exe
 .cache_ggshield
 labnuc_enable_winrm_https.ps1.bak
 labnuc-winrm.pem
+
+# Keep OS junk, editor cruft and secrets out of the repo.
+# macOS
+._*
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+Icon?
+# Windows
+Thumbs.db
+desktop.ini
+# Editors
+.vscode/
+.idea/
+*.swp
+*~
+# Secrets
+.env
+.env.*
+!.env.example
+# Dependencies and logs
+node_modules/
+*.log
