@@ -46,7 +46,7 @@ Key validator parameters used:
 - `/file:` - Validates VBM metadata or individual backup files
 - `/report:` - Generates HTML/XML validation reports
 - `/format:` - Specifies report format (html or xml)
-- `/silence` - Suppresses console output during validation (passed unless `-IncludeAllVMs` is set)
+- `/silence` - Suppresses console output during validation (always passed when validating individual backup files; for VBM validation only when `-IncludeAllVMs` is not set)
 
 ## Architecture Patterns
 

@@ -28,7 +28,7 @@ VeeamItUp+ is a PowerShell-based utility for analyzing and reporting on Veeam ba
 
 5. **HTML Reporting** (`New-HTMLReport`, `New-HTMLActivityLog`, `Update-HTMLLog`)
    - Generates interactive HTML reports with Chart.js visualizations (loaded from the jsDelivr CDN)
-   - Real-time activity logging with auto-refresh capability
+   - Activity log file rewritten as the run progresses (reload the page to see new entries)
 
 6. **OpenAI Analysis** (`Initialize-OpenAIConnection`, `Invoke-OpenAIAnalysis`, `Select-OpenAIModel`)
    - Optional; API key (DPAPI-encrypted) and model stored in the same registry key
@@ -49,7 +49,7 @@ VeeamItUp+ is a PowerShell-based utility for analyzing and reporting on Veeam ba
 
 Menu: `1-N` select a saved server and run the report, `S` manage server profiles, `C` test connectivity, `D` delete server profiles, `L` view the HTML activity log, `M` configure SMTP, `K` manage the OpenAI API key, `Q` quit. With no saved servers only `S`, `L`, `M`, `K` and `Q` are offered (add a profile under `S`).
 
-`Test-VBMChainValidation.ps1` is a stand-alone test of the VBM chain-validation logic; it parses `./DC01.vbm` in the current folder (the committed `DC01.vbm` is an empty placeholder).
+`Test-VBMChainValidation.ps1` is a stand-alone test of the VBM chain-validation logic; it parses `./DC01.vbm` in the current folder (the committed `DC01.vbm` is a real sample VBM file; the referenced `.vbk`/`.vib` files are not in the repo).
 
 ### Testing Connectivity
 The script includes built-in connectivity testing via menu option 'C' which:
@@ -60,7 +60,7 @@ The script includes built-in connectivity testing via menu option 'C' which:
 ### Viewing Logs
 - HTML activity logs (`VeeamItUpPlusLog-*.html`) are automatically created in `%USERPROFILE%\Downloads`
 - Access logs via menu option 'L' or directly open the HTML file
-- The log page has a Refresh button and an auto-refresh toggle
+- The log page has First / Refresh / Last buttons and a level filter (ALL, SUCCESS, ERROR); it does not refresh itself
 
 ## Key Functions Reference
 

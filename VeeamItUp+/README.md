@@ -6,7 +6,7 @@ Menu-driven PowerShell tool for analyzing Veeam backup repositories on one or mo
 
 - `VeeamItUpPlus.ps1` - the tool (Windows PowerShell 5.1 or later). Run it with no parameters: `.\VeeamItUpPlus.ps1`
 - `Test-VBMChainValidation.ps1` - stand-alone test of the VBM chain parser; reads `./DC01.vbm` from the current folder
-- `DC01.vbm` - empty placeholder for that test
+- `DC01.vbm` - sample VBM metadata file (a real Veeam export, about 70 KB) used by that test
 - `FileMetadata.html` - saved copy of a third-party article about Veeam metadata, kept as reference
 
 ## Menu

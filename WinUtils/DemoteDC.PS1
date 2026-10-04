@@ -11,7 +11,8 @@
     an HTML report.
 
 .PARAMETER DCName
-    Domain controller to check and demote. Defaults to the local computer name.
+    Domain controller name used for the status checks and the report. Defaults to the local
+    computer name. The demotion itself always runs on the local server.
 
 .PARAMETER LogPath
     Folder for the text log (DCDemotion_<timestamp>.log). Default C:\Logs\DC-Demotion.
