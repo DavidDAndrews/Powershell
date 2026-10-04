@@ -30,7 +30,7 @@ Main validation script (renamed from the earlier `Validate-VeeamBackupChains.ps1
 # Validate with custom report path
 .\Validate.PS1 -DatastorePath "D:\VeeamBackups" -ReportPath "C:\Reports"
 
-# Interactive mode (shows menu)
+# No -DatastorePath: prompts for the path
 .\Validate.PS1
 
 # Silent mode validation
@@ -46,7 +46,7 @@ Key validator parameters used:
 - `/file:` - Validates VBM metadata or individual backup files
 - `/report:` - Generates HTML/XML validation reports
 - `/format:` - Specifies report format (html or xml)
-- `/silence` - Suppresses console output during validation
+- `/silence` - Suppresses console output during validation (passed unless `-IncludeAllVMs` is set)
 
 ## Architecture Patterns
 

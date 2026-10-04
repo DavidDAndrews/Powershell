@@ -128,7 +128,7 @@ If targets are not in the same domain or you see **WinRM client cannot process t
 | `-TestMode` | switch | — | Query localhost without remoting |
 | `-ExportJson` | switch | — | Also emit `.json` output |
 | `-ExportCsv` | switch | — | Also emit `.csv` output |
-| `-OpenReport` | switch | `$true` | Open the HTML report in the default browser after generation |
+| `-OpenReport` | switch | `$true` | Open the HTML report in the default browser after generation; pass `-OpenReport:$false` to skip |
 | `-AddToTrustedHostsOnFailure` | switch | — | On WinRM/TrustedHosts failure, add the machine to TrustedHosts and retry (requires admin to modify TrustedHosts) |
 | `-PromptOnConnectionFailure` | switch | — | On WinRM/TrustedHosts failure, prompt to add the machine to TrustedHosts and retry; if Access denied, prompt to open elevated window to fix |
 | `-Verbose` | switch | — | Detailed progress output |
@@ -195,7 +195,7 @@ The report is a single self-contained HTML5 file with:
 
 ## Output Objects
 
-The script returns `WorkstationResult` objects to the pipeline:
+The script returns one result object per computer (`PSCustomObject`) to the pipeline:
 
 ```
 WorkstationResult
@@ -206,8 +206,9 @@ WorkstationResult
 ├── QueryTime      [timespan]
 └── Sessions[]
     └── LogonSession
-        ├── User, LogonId, LogonTime, LogoffTime
-        ├── SessionDuration, ActiveTime
+        ├── ComputerName, User, LogonId, LogonTime, LogoffTime
+        ├── SessionDuration, DurationDisplay, ActiveTime, ActiveTimeDisplay
+        ├── AccessType     RDP | Local | Network | Batch | Service | System | Other
         ├── LogonType, SourceIP, SourceWorkstation
         ├── AuthPackage, ProcessName
         ├── LogoffType, LogoffConfidence

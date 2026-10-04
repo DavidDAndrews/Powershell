@@ -5,7 +5,31 @@
 .SYNOPSIS
     Domain Controller Demotion Script with Role Cleanup
 .DESCRIPTION
-    Handles DC demotion and cleanup of AD DS/DNS roles for both active and already-demoted DCs
+    Handles DC demotion and cleanup of AD DS/DNS roles for both active and already-demoted DCs.
+    Prompts for a new local Administrator password (and Domain Admin credentials unless
+    -ForceRemoval), offers to remove the DNS Server role and to reboot, and writes a log and
+    an HTML report.
+
+.PARAMETER DCName
+    Domain controller to check and demote. Defaults to the local computer name.
+
+.PARAMETER LogPath
+    Folder for the text log (DCDemotion_<timestamp>.log). Default C:\Logs\DC-Demotion.
+    The HTML report is always written to C:\Logs.
+
+.PARAMETER ForceRemoval
+    Demote with Uninstall-ADDSDomainController -ForceRemoval (no Domain Admin credential
+    prompt), for a DC that can no longer reach the rest of the domain.
+
+.PARAMETER SkipPreChecks
+    Skip the pre-demotion checks. The pre-check section is currently a placeholder, so this
+    switch has no effect yet.
+
+.EXAMPLE
+    .\DemoteDC.PS1
+
+.EXAMPLE
+    .\DemoteDC.PS1 -ForceRemoval -LogPath D:\Logs
 #>
 
 [CmdletBinding()]

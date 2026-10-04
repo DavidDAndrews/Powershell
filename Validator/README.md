@@ -40,11 +40,11 @@ official `Veeam.Backup.Validator.exe` and produces HTML, CSV, and JSON reports.
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `DatastorePath` | String | _(prompted)_ | Local or UNC path to the backup datastore |
-| `ValidatorPath` | String | `C:\Program Files\Veeam\...\Veeam.Backup.Validator.exe` | Override the validator executable path |
+| `ValidatorPath` | String | `C:\Program Files\Veeam\Backup and Replication\Backup\Veeam.Backup.Validator.exe` | Override the validator executable path |
 | `ReportPath` | String | `%USERPROFILE%\Downloads\VeeamValidation` | Directory for all output files |
 | `Credential` | PSCredential | — | Credentials for UNC path access |
 | `IncludeAllVMs` | Switch | — | Validate each VM in a backup (slower) |
-| `Silent` | Switch | — | Suppress console output; write log file only |
+| `Silent` | Switch | — | Suppress console output and the browser pop-up; write log file only |
 | `ExportCsv` | Switch | — | Also write a flat CSV of results |
 | `ExportJson` | Switch | — | Also write a JSON file of results |
 | `SendTeamsNotification` | Switch | — | POST a summary to a Teams Incoming Webhook |
