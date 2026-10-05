@@ -1,4 +1,5 @@
 #Requires -Version 5.1
+
 <#
 .SYNOPSIS
     Validates Veeam backup chains in specified datastores using Veeam Backup Validator.
@@ -10,6 +11,7 @@
 
 .PARAMETER DatastorePath
     Path to the Veeam backup datastore to scan. Can be local path or UNC path.
+    If omitted, the script prompts for it.
 
 .PARAMETER ValidatorPath
     Path to Veeam.Backup.Validator.exe. Defaults to standard Veeam installation path.
@@ -22,6 +24,10 @@
 
 .PARAMETER IncludeAllVMs
     If specified, validates all VMs in each backup. Otherwise validates backup integrity only.
+
+.PARAMETER Silent
+    If specified, suppresses console output (the log file is still written) and does not
+    open the HTML report.
 
 .PARAMETER ExportCsv
     If specified, exports results to CSV.

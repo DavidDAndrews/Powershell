@@ -1,4 +1,5 @@
 #Requires -Version 7.0
+
 <#
 .SYNOPSIS
     Windows Logon Session Report - Queries Security event logs from remote machines,
@@ -70,7 +71,8 @@
     Also export a flattened CSV of sessions alongside the HTML report.
 
 .PARAMETER OpenReport
-    After the HTML report is written, open it in the default browser. Default: True.
+    After the HTML report is written, open it in the default browser. Default: True
+    (the script turns it on when not specified); pass -OpenReport:$false to skip.
 
 .PARAMETER AddToTrustedHostsOnFailure
     If a machine fails with a WinRM/TrustedHosts error (e.g. not domain-joined or non-Kerberos),

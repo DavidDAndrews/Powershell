@@ -14,7 +14,8 @@ Specifies the group that will have delegated admin rights on the RODC (optional)
 Specifies groups allowed to have passwords cached on the RODC (optional)
 
 .PARAMETER DenyPasswordReplication
-Specifies groups explicitly denied from having passwords cached (optional)
+Specifies groups explicitly denied from having passwords cached (optional).
+Default: 'Domain Admins', 'Enterprise Admins', 'Schema Admins', 'Cert Publishers'
 
 .PARAMETER DomainAdminUser
 Specifies the domain admin username to use for promotion (e.g., 'DOMAIN\Username' or just 'Username')
@@ -32,19 +33,19 @@ Skip confirmation prompts
 Only check domain status without attempting promotion
 
 .EXAMPLE
-.\Promote-RODC.ps1
+.\Promote-RODC-DNS.PS1
 Runs the script with default settings and prompts for credentials
 
 .EXAMPLE
-.\Promote-RODC.ps1 -CheckOnly
+.\Promote-RODC-DNS.PS1 -CheckOnly
 Only checks if the server is ready for RODC promotion
 
 .EXAMPLE
-.\Promote-RODC.ps1 -DomainAdminUser "CONTOSO\DCAdmin"
+.\Promote-RODC-DNS.PS1 -DomainAdminUser "CONTOSO\DCAdmin"
 Runs the script with a specific domain admin account
 
 .EXAMPLE
-.\Promote-RODC.ps1 -DelegatedAdminGroup "RODC_Admins" -Force
+.\Promote-RODC-DNS.PS1 -DelegatedAdminGroup "RODC_Admins" -Force
 Runs the script with a delegated admin group and no confirmation prompts
 
 .NOTES
